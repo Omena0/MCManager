@@ -1,4 +1,5 @@
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from validators import Validators
 import matplotlib.pyplot as plt
 import customtkinter as tki
 from servers import Server
@@ -11,10 +12,29 @@ import json
 import sys
 import os
 
-matplotlib.use("TkAgg")  # Set the backend for matplotlib
+#matplotlib.use("TkAgg")  # Set the backend for matplotlib
 
 class MCManager(tki.CTk):
-    def __init__(self):
+    def __init__(self, args:list=None):
+
+        if args is None:
+            args = []
+
+        self.args = args
+        self.servers = self.get_server_list()
+
+        if '-autostart' in args:
+            server_id = args[args.index('-autostart')+1]
+            if server_id in self.servers:
+                self.change_server(server_id)
+                self.start_server()
+            else:
+                exit(f'Error: No such server: {server_id}')
+
+        if '-nogui' in args:
+            self.running = True
+            return
+
         super().__init__()
 
         self.running = False
@@ -28,7 +48,6 @@ class MCManager(tki.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # Check if servers exist
-        self.servers = self.get_server_list()
         if not self.servers:
             # No servers found, show empty state UI
             self.show_no_servers_ui()
@@ -42,6 +61,12 @@ class MCManager(tki.CTk):
             self.monitor_thread = threading.Thread(target=self.monitor_resources)
             self.monitor_thread.daemon = True
             self.monitor_thread.start()
+
+    def run(self):
+        if '-nogui' not in self.args:
+            self.mainloop()
+        else:
+            self.monitor_resources()
 
     def on_closing(self):
         """Handle application shutdown properly - with FORCED silent exit"""
@@ -81,18 +106,25 @@ class MCManager(tki.CTk):
 
     def initialize_main_ui(self):
         """Initialize the main application UI with server management"""
-        # Configure grid
-        self.grid_columnconfigure(1, weight=1)
+        # Configure grid - Assign weights to columns with much greater difference
+        self.grid_columnconfigure(0, weight=1)      # Very small weight for sidebar
+        self.grid_columnconfigure(1, weight=5)     # Much larger weight for content
         self.grid_rowconfigure(0, weight=1)
 
-        # Create sidebar frame for server selection - REDUCED WIDTH
+        # Create sidebar frame that will resize with the window
         self.sidebar_frame = tki.CTkFrame(
             self,
-            width=150,
-            corner_radius=0
+            corner_radius=5,
+            width=180
         )
-        self.sidebar_frame.grid(row=0, column=0, rowspan=4, sticky="nsew")
+        self.sidebar_frame.grid(row=0, column=0, rowspan=4, sticky="nsew", padx=10, pady=(18, 10))
         self.sidebar_frame.grid_rowconfigure(4, weight=1)
+
+        # Configure sidebar frame's column to make inner widgets responsive
+        self.sidebar_frame.grid_columnconfigure(0, weight=1)
+
+        # Prevent the sidebar from collapsing below minimum width
+        self.sidebar_frame.grid_propagate(False)
 
         # App label - SMALLER FONT
         self.app_name = tki.CTkLabel(
@@ -100,7 +132,7 @@ class MCManager(tki.CTk):
             text="MC Manager",
             font=tki.CTkFont(size=16, weight="bold")
         )
-        self.app_name.grid(row=0, column=0, pady=(10, 5))  # REDUCED PADDING
+        self.app_name.grid(row=0, column=0, pady=(10, 5), sticky="ew")  # Make label expand horizontally
 
         # Server selection label
         self.server_label = tki.CTkLabel(
@@ -108,16 +140,16 @@ class MCManager(tki.CTk):
             text="Select Server:",
             anchor="w"
         )
-        self.server_label.grid(row=1, column=0, padx=10, pady=(5, 0), sticky="w")  # REDUCED PADDING
+        self.server_label.grid(row=1, column=0, padx=10, pady=(5, 0), sticky="ew")  # Make label expand horizontally
 
-        # Server selection dropdown - SMALLER WIDTH
+        # Server selection dropdown - EXPANDED TO FILL WIDTH
         self.server_option = tki.CTkOptionMenu(
             self.sidebar_frame,
             values=self.servers,
             command=self.change_server,
-            width=130
+            dynamic_resizing=False  # Prevent text from being cut off
         )
-        self.server_option.grid(row=2, column=0, padx=10, pady=(5, 5))  # REDUCED PADDING
+        self.server_option.grid(row=2, column=0, padx=10, pady=(5, 5), sticky="ew")  # Make dropdown expand horizontally
 
         # Add new server button
         self.add_server_btn = tki.CTkButton(
@@ -125,20 +157,25 @@ class MCManager(tki.CTk):
             text="Add New Server",
             command=self.start_server_wizard
         )
-        self.add_server_btn.grid(row=3, column=0, padx=10, pady=(0, 5), sticky="ew")  # REDUCED PADDING
+        self.add_server_btn.grid(row=3, column=0, padx=10, pady=(0, 5), sticky="ew")  # Already set to expand
 
-        # Server controls - MORE COMPACT
+        # Server controls frame - MAKE RESPONSIVE
         self.control_frame = tki.CTkFrame(self.sidebar_frame)
-        self.control_frame.grid(row=4, column=0, padx=10, pady=(5, 5), sticky="ew")  # REDUCED PADDING
+        self.control_frame.grid(row=4, column=0, padx=10, pady=(5, 5), sticky="new")  # Make frame expand horizontally
 
+        # Configure columns in control frame to distribute space evenly
+        self.control_frame.grid_columnconfigure(0, weight=1)
+        self.control_frame.grid_columnconfigure(1, weight=1)
+
+        # Control buttons
         self.start_button = tki.CTkButton(
             self.control_frame,
             text="Start",
-            height=28,  # SMALLER HEIGHT
+            height=28,
             command=self.start_server,
             fg_color="green"
         )
-        self.start_button.grid(row=0, column=0, padx=3, pady=3)  # REDUCED PADDING
+        self.start_button.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
 
         self.stop_button = tki.CTkButton(
             self.control_frame,
@@ -147,7 +184,7 @@ class MCManager(tki.CTk):
             command=self.stop_server,
             fg_color="red"
         )
-        self.stop_button.grid(row=0, column=1, padx=3, pady=3)  # REDUCED PADDING
+        self.stop_button.grid(row=0, column=1, padx=3, pady=3, sticky="ew")
 
         self.restart_button = tki.CTkButton(
             self.control_frame,
@@ -156,11 +193,11 @@ class MCManager(tki.CTk):
             command=self.restart_server,
             fg_color="orange"
         )
-        self.restart_button.grid(row=1, column=0, columnspan=2, padx=3, pady=3, sticky="ew")  # REDUCED PADDING
+        self.restart_button.grid(row=1, column=0, columnspan=2, padx=3, pady=3, sticky="ew")
 
         # Create main content area with tabview - REDUCED PADDING
-        self.tabview = tki.CTkTabview(self)
-        self.tabview.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)  # REDUCED PADDING
+        self.tabview = tki.CTkTabview(self, corner_radius=6)
+        self.tabview.grid(row=0, column=1, sticky="nsew", padx=(0,10), pady=(0,10))  # REDUCED PADDING
 
         # Create tabs
         self.dashboard_tab = self.tabview.add("Dashboard")
@@ -241,6 +278,9 @@ class MCManager(tki.CTk):
         for widget in self.winfo_children():
             widget.destroy()
 
+        # Initialize wizard data storage
+        self.saved_wizard_data = {}
+
         # Create wizard container frame
         self.wizard_frame = tki.CTkFrame(self)
         self.wizard_frame.pack(fill=tki.BOTH, expand=True, padx=20, pady=20)
@@ -263,9 +303,13 @@ class MCManager(tki.CTk):
         self.wizard_progress.pack(side=tki.RIGHT, padx=20, pady=20)
         self.wizard_progress.set(0)
 
-        # Content area
-        self.wizard_content = tki.CTkFrame(self.wizard_frame)
-        self.wizard_content.pack(fill=tki.BOTH, expand=True, padx=20, pady=20)
+        # Content area - make it scrollable to handle overflow
+        self.wizard_content_container = tki.CTkScrollableFrame(self.wizard_frame)
+        self.wizard_content_container.pack(fill=tki.BOTH, expand=True, padx=0, pady=0)
+
+        # Actual content frame within the scrollable container
+        self.wizard_content = tki.CTkFrame(self.wizard_content_container, fg_color="transparent")
+        self.wizard_content.pack(fill=tki.BOTH, expand=True)
 
         # Navigation buttons
         self.wizard_nav = tki.CTkFrame(self.wizard_frame)
@@ -284,6 +328,10 @@ class MCManager(tki.CTk):
 
     def wizard_show_step(self, step_index):
         """Display a specific step in the server creation wizard"""
+        # Save current step data if needed
+        if hasattr(self, 'current_step'):
+            self._save_current_step_data()
+
         self.current_step = step_index
 
         # Clear current content
@@ -314,6 +362,65 @@ class MCManager(tki.CTk):
         elif step_index == 4:
             self.wizard_step_summary()
 
+        # Disable next button if on EULA step and EULA not accepted
+        if step_index == 1 and hasattr(self, 'eula_var') and not self.eula_var.get():
+            self.next_btn.configure(state="disabled")
+
+    def _save_current_step_data(self):
+        """Save the current step's data to ensure it's not lost when navigating"""
+        # Don't save if no current step or saved_wizard_data doesn't exist
+        if not hasattr(self, 'current_step'):
+            return
+
+        # Initialize saved_wizard_data if it doesn't exist
+        if not hasattr(self, 'saved_wizard_data'):
+            self.saved_wizard_data = {}
+
+        # Step 0 (basic info): Save server name, description, ID, and port
+        if self.current_step == 0 and hasattr(self, 'server_name_var'):
+            self.saved_wizard_data['server_name'] = self.server_name_var.get()
+            self.saved_wizard_data['server_desc'] = self.server_desc_var.get()
+            self.saved_wizard_data['server_id'] = self.server_id_var.get()
+            self.saved_wizard_data['server_port'] = self.server_port_var.get()
+
+        # Step 1 (software): Save EULA state, version, and server type
+        if self.current_step == 1:
+            if hasattr(self, 'eula_var'):
+                self.saved_wizard_data['eula'] = self.eula_var.get()
+            if hasattr(self, 'version_var') and self.version_var.get():
+                self.saved_wizard_data['version'] = self.version_var.get()
+            if hasattr(self, 'server_type_var'):
+                self.saved_wizard_data['server_type'] = self.server_type_var.get()
+
+        # Step 2 (performance): Save memory and other settings
+        if self.current_step == 2:
+            if hasattr(self, 'memory_var'):
+                self.saved_wizard_data['memory'] = self.memory_var.get()
+            if hasattr(self, 'max_players_var'):
+                self.saved_wizard_data['max_players'] = self.max_players_var.get()
+            if hasattr(self, 'view_distance_var'):
+                self.saved_wizard_data['view_distance'] = self.view_distance_var.get()
+            if hasattr(self, 'gamemode_var'):
+                self.saved_wizard_data['gamemode'] = self.gamemode_var.get()
+            if hasattr(self, 'difficulty_var'):
+                self.saved_wizard_data['difficulty'] = self.difficulty_var.get()
+
+        # Step 3 (backups & security): Save backup and security settings
+        if self.current_step == 3:
+            if hasattr(self, 'auto_backup_var'):
+                self.saved_wizard_data['auto_backup'] = self.auto_backup_var.get()
+            if hasattr(self, 'backup_freq_var'):
+                self.saved_wizard_data['backup_freq'] = self.backup_freq_var.get()
+            if hasattr(self, 'max_backups_var'):
+                self.saved_wizard_data['max_backups'] = self.max_backups_var.get()
+            if hasattr(self, 'pvp_var'):
+                self.saved_wizard_data['pvp'] = self.pvp_var.get()
+
+            # Save whitelist settings
+            if hasattr(self, 'whitelist_var'):
+                self.saved_wizard_data['whitelist_enabled'] = self.whitelist_var.get()
+                self.saved_wizard_data['whitelist_players'] = self.whitelist_players if hasattr(self, 'whitelist_players') else []
+
     def wizard_next_step(self):
         """Advance to the next wizard step"""
         if self.current_step < len(self.wizard_steps) - 1:
@@ -325,118 +432,218 @@ class MCManager(tki.CTk):
             self.wizard_show_step(self.current_step - 1)
 
     def wizard_step_basic_info(self):
-        """Step 1: Basic server information"""
+        """Step 1: Basic server information with validation"""
         # Create form
         self.wizard_content.grid_columnconfigure(1, weight=1)
 
         # Form title
         title = tki.CTkLabel(self.wizard_content, text="Basic Server Information",
                            font=tki.CTkFont(size=18, weight="bold"))
-        title.grid(row=0, column=0, columnspan=2, padx=20, pady=(0, 20), sticky="w")
+        title.grid(row=0, column=0, columnspan=2, padx=15, pady=(0, 15), sticky="w")  # REDUCED PADDING
+
+        # Error message area
+        self.validation_error = tki.CTkLabel(self.wizard_content, text="", text_color="red")
+        self.validation_error.grid(row=6, column=0, columnspan=2, padx=15, pady=(0, 5), sticky="w")  # REDUCED PADDING
 
         # Server name
         name_label = tki.CTkLabel(self.wizard_content, text="Server Name:")
-        name_label.grid(row=1, column=0, padx=20, pady=10, sticky="w")
+        name_label.grid(row=1, column=0, padx=15, pady=8, sticky="w")  # REDUCED PADDING
 
-        self.server_name_var = tki.StringVar(value="My Minecraft Server")
+        # Restore server name from saved data or use default
+        server_name = "My Minecraft Server"
+        if hasattr(self, 'saved_wizard_data') and 'server_name' in self.saved_wizard_data:
+            server_name = self.saved_wizard_data['server_name']
+
+        self.server_name_var = tki.StringVar(value=server_name)
+        self.server_name_var.trace_add("write", self.validate_basic_info)
         self.server_name_entry = tki.CTkEntry(self.wizard_content, width=400,
                                             textvariable=self.server_name_var)
-        self.server_name_entry.grid(row=1, column=1, padx=20, pady=10, sticky="ew")
+        self.server_name_entry.grid(row=1, column=1, padx=15, pady=8, sticky="ew")  # REDUCED PADDING
 
         # Server description (MOTD)
         desc_label = tki.CTkLabel(self.wizard_content, text="Server Description (MOTD):")
-        desc_label.grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        desc_label.grid(row=2, column=0, padx=15, pady=8, sticky="w")  # REDUCED PADDING
 
-        self.server_desc_var = tki.StringVar(value="A Minecraft Server")
+        # Restore description from saved data or use default
+        server_desc = "A Minecraft Server"
+        if hasattr(self, 'saved_wizard_data') and 'server_desc' in self.saved_wizard_data:
+            server_desc = self.saved_wizard_data['server_desc']
+
+        self.server_desc_var = tki.StringVar(value=server_desc)
         self.server_desc_entry = tki.CTkEntry(self.wizard_content, width=400,
                                             textvariable=self.server_desc_var)
-        self.server_desc_entry.grid(row=2, column=1, padx=20, pady=10, sticky="ew")
+        self.server_desc_entry.grid(row=2, column=1, padx=15, pady=8, sticky="ew")  # REDUCED PADDING
 
         # Server ID (for proxies like Velocity)
         id_label = tki.CTkLabel(self.wizard_content, text="Server ID (for proxies):")
-        id_label.grid(row=3, column=0, padx=20, pady=10, sticky="w")
+        id_label.grid(row=3, column=0, padx=15, pady=8, sticky="w")  # REDUCED PADDING
 
-        self.server_id_var = tki.StringVar(value="main")
+        # Restore server ID from saved data or use default
+        server_id = "main"
+        if hasattr(self, 'saved_wizard_data') and 'server_id' in self.saved_wizard_data:
+            server_id = self.saved_wizard_data['server_id']
+
+        self.server_id_var = tki.StringVar(value=server_id)
+        self.server_id_var.trace_add("write", self.validate_basic_info)
         self.server_id_entry = tki.CTkEntry(self.wizard_content, width=400,
                                           textvariable=self.server_id_var)
-        self.server_id_entry.grid(row=3, column=1, padx=20, pady=10, sticky="ew")
+        self.server_id_entry.grid(row=3, column=1, padx=15, pady=8, sticky="ew")  # REDUCED PADDING
 
         # Server port
         port_label = tki.CTkLabel(self.wizard_content, text="Server Port:")
-        port_label.grid(row=4, column=0, padx=20, pady=10, sticky="w")
+        port_label.grid(row=4, column=0, padx=15, pady=8, sticky="w")  # REDUCED PADDING
 
-        self.server_port_var = tki.StringVar(value="25565")
+        # Restore port from saved data or use default
+        server_port = "25565"
+        if hasattr(self, 'saved_wizard_data') and 'server_port' in self.saved_wizard_data:
+            server_port = self.saved_wizard_data['server_port']
+
+        self.server_port_var = tki.StringVar(value=server_port)
+        self.server_port_var.trace_add("write", self.validate_basic_info)
         self.server_port_entry = tki.CTkEntry(self.wizard_content, width=400,
                                             textvariable=self.server_port_var)
-        self.server_port_entry.grid(row=4, column=1, padx=20, pady=10, sticky="ew")
+        self.server_port_entry.grid(row=4, column=1, padx=15, pady=8, sticky="ew")  # REDUCED PADDING
 
         # Description text
         desc_text = "These basic settings define how your server appears to players and how it connects to networks."
         description = tki.CTkLabel(self.wizard_content, text=desc_text, wraplength=600)
-        description.grid(row=5, column=0, columnspan=2, padx=20, pady=(20, 10), sticky="w")
+        description.grid(row=5, column=0, columnspan=2, padx=15, pady=(15, 5), sticky="w")  # REDUCED PADDING
+
+        # Run initial validation
+        self.validate_basic_info()
+
+    def validate_basic_info(self, *args):
+        """Validate basic info fields and update UI accordingly"""
+        valid = True
+        error_msg = ""
+
+        # Validate server name (not empty)
+        server_name = self.server_name_var.get().strip()
+        if not server_name:
+            valid = False
+            error_msg = "Server name cannot be empty"
+
+        # Validate server ID (alphanumeric)
+        server_id = self.server_id_var.get().strip()
+        if not Validators.alphanumeric(server_id):
+            valid = False
+            error_msg = "Server ID must be alphanumeric"
+
+        # Validate port (numeric, between 1024-65535)
+        port = self.server_port_var.get().strip()
+        if not Validators.number(port):
+            valid = False
+            error_msg = "Port must be a number"
+        elif not (1024 <= int(port) <= 65535):
+            valid = False
+            error_msg = "Port must be between 1024 and 65535"
+
+        # Update validation error message
+        if hasattr(self, 'validation_error'):
+            self.validation_error.configure(text=error_msg)
+
+        # Update next button state
+        if hasattr(self, 'next_btn'):
+            self.next_btn.configure(state="normal" if valid else "disabled")
+
+        return valid
 
     def wizard_step_software(self):
         """Step 2: Server software selection"""
         # Create form
         self.wizard_content.grid_columnconfigure(1, weight=1)
+        self.wizard_content.grid_rowconfigure(6, weight=1)  # Make the version selector expandable
 
         # Form title
         title = tki.CTkLabel(self.wizard_content, text="Server Software",
                            font=tki.CTkFont(size=18, weight="bold"))
-        title.grid(row=0, column=0, columnspan=2, padx=20, pady=(0, 20), sticky="w")
+        title.grid(row=0, column=0, columnspan=2, padx=15, pady=(0, 15), sticky="w")  # REDUCED PADDING
 
         # Server type selection
         type_label = tki.CTkLabel(self.wizard_content, text="Server Software:")
-        type_label.grid(row=1, column=0, padx=20, pady=10, sticky="w")
+        type_label.grid(row=1, column=0, padx=15, pady=8, sticky="w")  # REDUCED PADDING
 
-        self.server_type_var = tki.StringVar(value="paper")
+        # Get saved server type if available
+        server_type = "purpur"  # Default to purpur
+        if hasattr(self, 'saved_wizard_data') and 'server_type' in self.saved_wizard_data:
+            server_type = self.saved_wizard_data['server_type']
 
-        paper_radio = tki.CTkRadioButton(self.wizard_content, text="Paper (Recommended)",
+        self.server_type_var = tki.StringVar(value=server_type)
+
+        paper_radio = tki.CTkRadioButton(self.wizard_content, text="Paper",
                                        variable=self.server_type_var, value="paper",
                                        command=self.fetch_server_versions)
-        paper_radio.grid(row=1, column=1, padx=20, pady=5, sticky="w")
+        paper_radio.grid(row=1, column=1, padx=15, pady=4, sticky="w")  # REDUCED PADDING
 
         paper_desc = tki.CTkLabel(self.wizard_content,
                                 text="High performance Spigot fork with additional optimizations and features")
-        paper_desc.grid(row=2, column=1, padx=35, pady=(0, 10), sticky="w")
+        paper_desc.grid(row=2, column=1, padx=30, pady=(0, 8), sticky="w")  # REDUCED PADDING
 
-        purpur_radio = tki.CTkRadioButton(self.wizard_content, text="Purpur",
+        purpur_radio = tki.CTkRadioButton(self.wizard_content, text="Purpur (Recommended)",
                                         variable=self.server_type_var, value="purpur",
                                         command=self.fetch_server_versions)
-        purpur_radio.grid(row=3, column=1, padx=20, pady=5, sticky="w")
+        purpur_radio.grid(row=3, column=1, padx=15, pady=4, sticky="w")  # REDUCED PADDING
 
         purpur_desc = tki.CTkLabel(self.wizard_content,
                                  text="Fork of Paper with additional features and optimizations")
-        purpur_desc.grid(row=4, column=1, padx=35, pady=(0, 10), sticky="w")
+        purpur_desc.grid(row=4, column=1, padx=30, pady=(0, 8), sticky="w")  # REDUCED PADDING
 
         # Game version selection
         version_label = tki.CTkLabel(self.wizard_content, text="Minecraft Version:")
-        version_label.grid(row=5, column=0, padx=20, pady=10, sticky="nw")
+        version_label.grid(row=5, column=0, padx=15, pady=8, sticky="nw")  # REDUCED PADDING
 
         # Version selection frame with loading indicator
-        self.version_frame = tki.CTkFrame(self.wizard_content)
-        self.version_frame.grid(row=5, column=1, padx=20, pady=10, sticky="ew")
+        self.version_frame = tki.CTkScrollableFrame(self.wizard_content, height=180)  # REDUCED HEIGHT
+        self.version_frame.grid(row=5, column=1, padx=15, pady=8, sticky="nsew")  # REDUCED PADDING
 
         self.version_loading = tki.CTkLabel(self.version_frame, text="Loading versions...")
-        self.version_loading.pack(pady=10)
+        self.version_loading.pack(pady=8)  # REDUCED PADDING
 
-        # Eula acceptance
+        # Eula acceptance - moved to bottom for better visibility
         eula_frame = tki.CTkFrame(self.wizard_content)
-        eula_frame.grid(row=6, column=0, columnspan=2, padx=20, pady=(20, 10), sticky="ew")
+        eula_frame.grid(row=7, column=0, columnspan=2, padx=15, pady=(8, 5), sticky="ew")  # REDUCED PADDING
 
-        self.eula_var = tki.BooleanVar(value=False)
+        # Check for saved EULA acceptance
+        eula_accepted = False
+        if hasattr(self, 'saved_wizard_data') and 'eula' in self.saved_wizard_data:
+            eula_accepted = self.saved_wizard_data['eula']
+
+        self.eula_var = tki.BooleanVar(value=eula_accepted)
+        # Add trace to update next button state when EULA is toggled
+        self.eula_var.trace_add("write", self.update_eula_state)
+
         self.eula_check = tki.CTkCheckBox(eula_frame,
                                         text="I agree to the Minecraft End User License Agreement",
                                         variable=self.eula_var)
-        self.eula_check.pack(side=tki.LEFT, padx=10, pady=10)
+        self.eula_check.pack(side=tki.LEFT, padx=8, pady=8)  # REDUCED PADDING
 
         eula_link = tki.CTkButton(eula_frame, text="View EULA",
                                 command=lambda: self.open_url("https://www.minecraft.net/en-us/eula"),
                                 width=100)
-        eula_link.pack(side=tki.RIGHT, padx=10, pady=10)
+        eula_link.pack(side=tki.RIGHT, padx=8, pady=8)  # REDUCED PADDING
+
+        # EULA requirement label in red
+        self.eula_required = tki.CTkLabel(
+            eula_frame,
+            text="* You must accept the EULA to continue",
+            text_color="red"
+        )
+        self.eula_required.pack(side=tki.BOTTOM, padx=8, pady=(0, 3))  # REDUCED PADDING
 
         # Fetch versions
         self.fetch_server_versions()
+
+        # Update next button state based on initial EULA setting
+        self.update_eula_state()
+
+    def update_eula_state(self, *args):
+        """Update next button state based on EULA acceptance"""
+        if hasattr(self, 'next_btn'):
+            self.next_btn.configure(state="normal" if self.eula_var.get() else "disabled")
+
+        # Update the visibility of the EULA requirement text
+        if hasattr(self, 'eula_required'):
+            self.eula_required.configure(text="" if self.eula_var.get() else "* You must accept the EULA to continue")
 
     def fetch_server_versions(self):
         """Fetch available versions from server software API"""
@@ -545,19 +752,24 @@ class MCManager(tki.CTk):
         # Form title
         title = tki.CTkLabel(self.wizard_content, text="Server Performance",
                            font=tki.CTkFont(size=18, weight="bold"))
-        title.grid(row=0, column=0, columnspan=2, padx=20, pady=(0, 20), sticky="w")
+        title.grid(row=0, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="w")  # REDUCED PADDING
 
         # Memory allocation
         memory_label = tki.CTkLabel(self.wizard_content, text="Memory Allocation (MB):")
-        memory_label.grid(row=1, column=0, padx=20, pady=10, sticky="w")
+        memory_label.grid(row=1, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.memory_var = tki.StringVar(value="2048")
+        # Get memory value from saved data or use default
+        memory_value = "2048"
+        if hasattr(self, 'saved_wizard_data') and 'memory' in self.saved_wizard_data:
+            memory_value = self.saved_wizard_data['memory']
+
+        self.memory_var = tki.StringVar(value=memory_value)
         self.memory_entry = tki.CTkEntry(self.wizard_content, width=200,
                                        textvariable=self.memory_var)
-        self.memory_entry.grid(row=1, column=1, padx=20, pady=10, sticky="w")
+        self.memory_entry.grid(row=1, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         memory_presets = tki.CTkFrame(self.wizard_content)
-        memory_presets.grid(row=2, column=1, padx=20, pady=(0, 10), sticky="w")
+        memory_presets.grid(row=2, column=1, padx=10, pady=(0, 6), sticky="w")  # REDUCED PADDING
 
         # Memory preset buttons
         preset_values = [
@@ -569,9 +781,9 @@ class MCManager(tki.CTk):
         ]
 
         for i, (label, value) in enumerate(preset_values):
-            btn = tki.CTkButton(memory_presets, text=label, width=70,
+            btn = tki.CTkButton(memory_presets, text=label, width=60,  # REDUCED BUTTON WIDTH
                               command=lambda v=value: self.memory_var.set(v))
-            btn.grid(row=0, column=i, padx=5, pady=5)
+            btn.grid(row=0, column=i, padx=2, pady=2)  # REDUCED PADDING
 
         # Memory recommendation text
         import psutil
@@ -580,49 +792,70 @@ class MCManager(tki.CTk):
 
         memory_desc = tki.CTkLabel(self.wizard_content,
                                  text=f"Recommended: {recommended} MB (Your system has {total_memory} MB)")
-        memory_desc.grid(row=3, column=1, padx=20, pady=(0, 20), sticky="w")
+        memory_desc.grid(row=3, column=1, padx=10, pady=(0, 10), sticky="w")  # REDUCED PADDING
 
         # Max players
         players_label = tki.CTkLabel(self.wizard_content, text="Maximum Players:")
-        players_label.grid(row=4, column=0, padx=20, pady=10, sticky="w")
+        players_label.grid(row=4, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.max_players_var = tki.StringVar(value="20")
+        # Get max players from saved data or use default
+        max_players = "20"
+        if hasattr(self, 'saved_wizard_data') and 'max_players' in self.saved_wizard_data:
+            max_players = self.saved_wizard_data['max_players']
+
+        self.max_players_var = tki.StringVar(value=max_players)
         self.max_players_entry = tki.CTkEntry(self.wizard_content, width=200,
                                             textvariable=self.max_players_var)
-        self.max_players_entry.grid(row=4, column=1, padx=20, pady=10, sticky="w")
+        self.max_players_entry.grid(row=4, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         # View distance
         view_label = tki.CTkLabel(self.wizard_content, text="View Distance:")
-        view_label.grid(row=5, column=0, padx=20, pady=10, sticky="w")
+        view_label.grid(row=5, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.view_distance_var = tki.StringVar(value="10")
+        # Get view distance from saved data or use default
+        view_distance = "10"
+        if hasattr(self, 'saved_wizard_data') and 'view_distance' in self.saved_wizard_data:
+            view_distance = self.saved_wizard_data['view_distance']
+
+        self.view_distance_var = tki.StringVar(value=view_distance)
         self.view_distance_entry = tki.CTkEntry(self.wizard_content, width=200,
                                               textvariable=self.view_distance_var)
-        self.view_distance_entry.grid(row=5, column=1, padx=20, pady=10, sticky="w")
+        self.view_distance_entry.grid(row=5, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        view_desc = tki.CTkLabel(self.wizard_content,
-                               text="Lower values improve performance but reduce visible terrain.")
-        view_desc.grid(row=6, column=1, padx=20, pady=(0, 10), sticky="w")
+        # Gamemode
+        gamemode_label = tki.CTkLabel(self.wizard_content, text="Default Gamemode:")
+        gamemode_label.grid(row=6, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        # Server mode
-        mode_label = tki.CTkLabel(self.wizard_content, text="Default Gamemode:")
-        mode_label.grid(row=7, column=0, padx=20, pady=10, sticky="w")
+        # Get gamemode from saved data or use default
+        gamemode = "survival"
+        if hasattr(self, 'saved_wizard_data') and 'gamemode' in self.saved_wizard_data:
+            gamemode = self.saved_wizard_data['gamemode']
 
-        self.gamemode_var = tki.StringVar(value="survival")
-        gamemode_combo = tki.CTkComboBox(self.wizard_content, width=200,
-                                        values=["survival", "creative", "adventure", "spectator"],
-                                        variable=self.gamemode_var)
-        gamemode_combo.grid(row=7, column=1, padx=20, pady=10, sticky="w")
+        self.gamemode_var = tki.StringVar(value=gamemode)
+        self.gamemode_combo = tki.CTkComboBox(self.wizard_content, width=200,
+                                            values=["survival", "creative", "adventure", "spectator"],
+                                            variable=self.gamemode_var)
+        self.gamemode_combo.grid(row=6, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         # Difficulty
-        diff_label = tki.CTkLabel(self.wizard_content, text="Difficulty:")
-        diff_label.grid(row=8, column=0, padx=20, pady=10, sticky="w")
+        difficulty_label = tki.CTkLabel(self.wizard_content, text="Difficulty:")
+        difficulty_label.grid(row=7, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.difficulty_var = tki.StringVar(value="normal")
-        difficulty_combo = tki.CTkComboBox(self.wizard_content, width=200,
-                                          values=["peaceful", "easy", "normal", "hard"],
-                                          variable=self.difficulty_var)
-        difficulty_combo.grid(row=8, column=1, padx=20, pady=10, sticky="w")
+        # Get difficulty from saved data or use default
+        difficulty = "normal"
+        if hasattr(self, 'saved_wizard_data') and 'difficulty' in self.saved_wizard_data:
+            difficulty = self.saved_wizard_data['difficulty']
+
+        self.difficulty_var = tki.StringVar(value=difficulty)
+        self.difficulty_combo = tki.CTkComboBox(self.wizard_content, width=200,
+                                              values=["peaceful", "easy", "normal", "hard"],
+                                              variable=self.difficulty_var)
+        self.difficulty_combo.grid(row=7, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
+
+        # Description text
+        desc_text = "These settings control the performance and gameplay of your server. Higher values may require more resources."
+        description = tki.CTkLabel(self.wizard_content, text=desc_text, wraplength=600)
+        description.grid(row=8, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")  # REDUCED PADDING
 
     def wizard_step_backups(self):
         """Step 4: Backup and security settings"""
@@ -632,168 +865,345 @@ class MCManager(tki.CTk):
         # Form title
         title = tki.CTkLabel(self.wizard_content, text="Backups & Security",
                            font=tki.CTkFont(size=18, weight="bold"))
-        title.grid(row=0, column=0, columnspan=2, padx=20, pady=(0, 20), sticky="w")
+        title.grid(row=0, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="w")  # REDUCED PADDING
 
         # Auto backup settings
         backup_label = tki.CTkLabel(self.wizard_content, text="Automatic Backups:")
-        backup_label.grid(row=1, column=0, padx=20, pady=10, sticky="w")
+        backup_label.grid(row=1, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.auto_backup_var = tki.BooleanVar(value=True)
+        # Get backup settings from saved data or use defaults
+        auto_backup = True
+        if hasattr(self, 'saved_wizard_data') and 'auto_backup' in self.saved_wizard_data:
+            auto_backup = self.saved_wizard_data['auto_backup']
+
+        self.auto_backup_var = tki.BooleanVar(value=auto_backup)
         auto_backup_switch = tki.CTkSwitch(self.wizard_content, text="Enable automatic backups",
                                          variable=self.auto_backup_var)
-        auto_backup_switch.grid(row=1, column=1, padx=20, pady=10, sticky="w")
+        auto_backup_switch.grid(row=1, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         # Backup frequency
         freq_label = tki.CTkLabel(self.wizard_content, text="Backup Frequency:")
-        freq_label.grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        freq_label.grid(row=2, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.backup_freq_var = tki.StringVar(value="24")
-        backup_freq_combo = tki.CTkComboBox(self.wizard_content, width=200,
-                                          values=["6", "12", "24", "48", "72"],
-                                          variable=self.backup_freq_var)
-        backup_freq_combo.grid(row=2, column=1, padx=20, pady=10, sticky="w")
+        # Get backup frequency from saved data or use default
+        backup_freq = "24"
+        if hasattr(self, 'saved_wizard_data') and 'backup_freq' in self.saved_wizard_data:
+            backup_freq = self.saved_wizard_data['backup_freq']
+
+        self.backup_freq_var = tki.StringVar(value=backup_freq)
+        backup_freq_combo = tki.CTkComboBox(self.wizard_content, width=180,  # REDUCED WIDTH
+                                           values=["6", "12", "24", "48", "72"],
+                                           variable=self.backup_freq_var)
+        backup_freq_combo.grid(row=2, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         backup_freq_desc = tki.CTkLabel(self.wizard_content, text="Hours between automatic backups")
-        backup_freq_desc.grid(row=3, column=1, padx=20, pady=(0, 10), sticky="w")
+        backup_freq_desc.grid(row=3, column=1, padx=10, pady=(0, 6), sticky="w")  # REDUCED PADDING
 
         # Max backups
         max_backups_label = tki.CTkLabel(self.wizard_content, text="Max Backups:")
-        max_backups_label.grid(row=4, column=0, padx=20, pady=10, sticky="w")
+        max_backups_label.grid(row=4, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.max_backups_var = tki.StringVar(value="10")
-        max_backups_combo = tki.CTkComboBox(self.wizard_content, width=200,
-                                          values=["5", "10", "20", "30", "All"],
-                                          variable=self.max_backups_var)
-        max_backups_combo.grid(row=4, column=1, padx=20, pady=10, sticky="w")
+        # Get max backups from saved data or use default
+        max_backups = "10"
+        if hasattr(self, 'saved_wizard_data') and 'max_backups' in self.saved_wizard_data:
+            max_backups = self.saved_wizard_data['max_backups']
+
+        self.max_backups_var = tki.StringVar(value=max_backups)
+        max_backups_combo = tki.CTkComboBox(self.wizard_content, width=180,  # REDUCED WIDTH
+                                           values=["5", "10", "20", "30", "All"],
+                                           variable=self.max_backups_var)
+        max_backups_combo.grid(row=4, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
         max_backups_desc = tki.CTkLabel(self.wizard_content, text="Maximum number of backups to keep (oldest will be deleted)")
-        max_backups_desc.grid(row=5, column=1, padx=20, pady=(0, 10), sticky="w")
+        max_backups_desc.grid(row=5, column=1, padx=10, pady=(0, 6), sticky="w")  # REDUCED PADDING
 
         # Security section
         security_title = tki.CTkLabel(self.wizard_content, text="Security",
                                     font=tki.CTkFont(size=16, weight="bold"))
-        security_title.grid(row=6, column=0, columnspan=2, padx=20, pady=(20, 10), sticky="w")
+        security_title.grid(row=6, column=0, columnspan=2, padx=10, pady=(15, 8), sticky="w")  # REDUCED PADDING
 
-        # Online mode (authenticate with Mojang)
-        online_mode_label = tki.CTkLabel(self.wizard_content, text="Online Mode:")
-        online_mode_label.grid(row=7, column=0, padx=20, pady=10, sticky="w")
-
-        self.online_mode_var = tki.BooleanVar(value=True)
-        online_mode_switch = tki.CTkSwitch(self.wizard_content, text="Verify players with Mojang",
-                                          variable=self.online_mode_var)
-        online_mode_switch.grid(row=7, column=1, padx=20, pady=10, sticky="w")
-
-        online_mode_desc = tki.CTkLabel(self.wizard_content,
-                                       text="When enabled, players must have a valid Minecraft account (recommended)")
-        online_mode_desc.grid(row=8, column=1, padx=20, pady=(0, 10), sticky="w")
+        # Online mode information (instead of toggle)
+        online_info = tki.CTkLabel(self.wizard_content,
+                                  text="This server will run in online mode, requiring players to have a valid Minecraft account.",
+                                  wraplength=500)
+        online_info.grid(row=7, column=0, columnspan=2, padx=10, pady=(0, 8), sticky="w")  # REDUCED PADDING
 
         # PvP settings
         pvp_label = tki.CTkLabel(self.wizard_content, text="PvP:")
-        pvp_label.grid(row=9, column=0, padx=20, pady=10, sticky="w")
+        pvp_label.grid(row=8, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-        self.pvp_var = tki.BooleanVar(value=True)
+        # Get PvP setting from saved data or use default
+        pvp_enabled = True
+        if hasattr(self, 'saved_wizard_data') and 'pvp' in self.saved_wizard_data:
+            pvp_enabled = self.saved_wizard_data['pvp']
+
+        self.pvp_var = tki.BooleanVar(value=pvp_enabled)
         pvp_switch = tki.CTkSwitch(self.wizard_content, text="Enable player vs. player combat",
                                  variable=self.pvp_var)
-        pvp_switch.grid(row=9, column=1, padx=20, pady=10, sticky="w")
+        pvp_switch.grid(row=8, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
 
-    def wizard_step_summary(self):
+        # Whitelist section
+        whitelist_label = tki.CTkLabel(self.wizard_content, text="Whitelist:")
+        whitelist_label.grid(row=9, column=0, padx=10, pady=6, sticky="w")  # REDUCED PADDING
+
+        # Get whitelist settings from saved data
+        whitelist_enabled = False
+        if hasattr(self, 'saved_wizard_data') and 'whitelist_enabled' in self.saved_wizard_data:
+            whitelist_enabled = self.saved_wizard_data['whitelist_enabled']
+
+        self.whitelist_var = tki.BooleanVar(value=whitelist_enabled)
+        whitelist_switch = tki.CTkSwitch(self.wizard_content, text="Enable whitelist (only listed players can join)",
+                                       variable=self.whitelist_var,
+                                       command=self.update_whitelist_frame)
+        whitelist_switch.grid(row=9, column=1, padx=10, pady=6, sticky="w")  # REDUCED PADDING
+
+        # Load whitelist players from saved data
+        if hasattr(self, 'saved_wizard_data') and 'whitelist_players' in self.saved_wizard_data:
+            self.whitelist_players = self.saved_wizard_data['whitelist_players']
+        else:
+            self.whitelist_players = []
+
+        # Whitelist players frame (initially hidden)
+        self.whitelist_frame = tki.CTkFrame(self.wizard_content)
+        self.whitelist_frame.grid(row=10, column=0, columnspan=2, padx=10, pady=6, sticky="ew")  # REDUCED PADDING
+
+        # Scrollable list for whitelist players
+        self.whitelist_list_frame = tki.CTkScrollableFrame(self.whitelist_frame, height=130, width=400)  # REDUCED HEIGHT
+        self.whitelist_list_frame.pack(fill=tki.X, expand=True, pady=6)  # REDUCED PADDING
+
+        # Buttons for managing whitelist
+        buttons_frame = tki.CTkFrame(self.whitelist_frame)
+        buttons_frame.pack(fill=tki.X, pady=(0, 6))  # REDUCED PADDING
+
+        add_player_btn = tki.CTkButton(buttons_frame, text="Add Player",
+                                     command=self.add_whitelist_player, width=110)  # REDUCED WIDTH
+        add_player_btn.pack(side=tki.LEFT, padx=8, pady=3)  # REDUCED PADDING
+
+        remove_player_btn = tki.CTkButton(buttons_frame, text="Remove Selected",
+                                        command=self.remove_whitelist_player, width=110)  # REDUCED WIDTH
+        remove_player_btn.pack(side=tki.LEFT, padx=8, pady=3)  # REDUCED PADDING
+
+        # Update whitelist frame visibility based on initial value
+        self.update_whitelist_frame()
+
+        # Make sure online mode is always true (hidden variable)
+        self.online_mode_var = tki.BooleanVar(value=True)
+
+    def update_whitelist_frame(self):
+        """Show or hide whitelist configuration based on whitelist toggle"""
+        if hasattr(self, 'whitelist_var') and hasattr(self, 'whitelist_frame'):
+            if self.whitelist_var.get():
+                self.whitelist_frame.grid()
+                self.update_whitelist_list()
+            else:
+                self.whitelist_frame.grid_remove()
+
+    def update_whitelist_list(self):
+        """Update the whitelist players list display"""
+        # Clear existing content
+        for widget in self.whitelist_list_frame.winfo_children():
+            widget.destroy()
+
+        # Show whitelist players or a message if empty
+        if not self.whitelist_players:
+            empty_label = tki.CTkLabel(self.whitelist_list_frame,
+                                    text="No players in whitelist. Add players below.")
+            empty_label.pack(pady=20)
+        else:
+            # Add each player to the list with selection capability
+            for i, player in enumerate(self.whitelist_players):
+                player_frame = tki.CTkFrame(self.whitelist_list_frame)
+                player_frame.pack(fill=tki.X, pady=2)
+
+                # Use a variable to track selection
+                var = tki.IntVar(value=0)
+
+                # Create a checkbutton for selection
+                checkbtn = tki.CTkCheckBox(player_frame, text="", variable=var)
+                checkbtn.pack(side=tki.LEFT, padx=5)
+
+                # Store the selection variable in the frame for later access
+                player_frame.selection_var = var
+
+                # Player name label
+                player_label = tki.CTkLabel(player_frame, text=player)
+                player_label.pack(side=tki.LEFT, padx=5, fill=tki.X, expand=True)
+
+    def add_whitelist_player(self):
+        """Open dialog to add a player to the whitelist"""
+        dialog = tki.CTkInputDialog(text="Enter Minecraft username:", title="Add Player to Whitelist")
+        player_name = dialog.get_input()
+
+        if player_name:
+            # Validate username (alphanumeric with underscores, 3-16 chars)
+            import re
+            if not re.match(r'^[a-zA-Z0-9_]{3,16}$', player_name):
+                self.show_notification("Invalid Minecraft username. Must be 3-16 alphanumeric characters or underscores.", "error")
+                return
+
+            # Add to whitelist if not already there
+            if player_name not in self.whitelist_players:
+                self.whitelist_players.append(player_name)
+                self.update_whitelist_list()
+            else:
+                self.show_notification("Player is already in the whitelist.")
+
+    def remove_whitelist_player(self):
+        """Remove selected players from whitelist"""
+        # Find all selected players
+        selected_players = []
+
+        for widget in self.whitelist_list_frame.winfo_children():
+            if hasattr(widget, 'selection_var') and widget.selection_var.get() == 1:
+                # Find player name in the child widgets (should be a label)
+                for child in widget.winfo_children():
+                    if isinstance(child, tki.CTkLabel):
+                        selected_players.append(child.cget("text"))
+
+        # Remove selected players
+        if selected_players:
+            for player in selected_players:
+                if player in self.whitelist_players:
+                    self.whitelist_players.remove(player)
+
+            self.update_whitelist_list()
+        else:
+            self.show_notification("No players selected for removal.")
+
+    def wizard_step_summary(self):  # sourcery skip: low-code-quality
         """Step 5: Summary of server settings before creation"""
         # Create scrollable frame for summary
-        summary_frame = tki.CTkScrollableFrame(self.wizard_content)
-        summary_frame.pack(fill=tki.BOTH, expand=True, padx=20, pady=20)
+        self.wizard_content.grid_columnconfigure(0, weight=1)
+        self.wizard_content.grid_rowconfigure(0, weight=1)
+
+        # Use grid instead of pack for more consistent positioning
+        summary_frame = tki.CTkFrame(self.wizard_content)
+        summary_frame.pack(padx=10, pady=10, fill='both', expand=True)
 
         # Add title
         title = tki.CTkLabel(summary_frame, text="Server Configuration Summary",
                            font=tki.CTkFont(size=18, weight="bold"))
-        title.pack(anchor="w", pady=(0, 20))
+        title.pack(anchor="w", pady=(5, 15), padx=5)  # REDUCED PADDING
 
         # Basic Information
         basic_title = tki.CTkLabel(summary_frame, text="Basic Information",
                                  font=tki.CTkFont(size=16, weight="bold"))
-        basic_title.pack(anchor="w", pady=(10, 5))
+        basic_title.pack(anchor="w", pady=(8, 4), padx=5)  # REDUCED PADDING
+
+        # Save current settings to ensure we have the latest
+        if not hasattr(self, 'saved_wizard_data'):
+            self.saved_wizard_data = {}
+
+        # Use values from saved data or current variables
+        if hasattr(self, 'server_name_var'):
+            self.saved_wizard_data['server_name'] = self.server_name_var.get()
+            self.saved_wizard_data['server_desc'] = self.server_desc_var.get()
+            self.saved_wizard_data['server_id'] = self.server_id_var.get()
+            self.saved_wizard_data['server_port'] = self.server_port_var.get()
 
         basic_info = {
-            "Server Name": self.server_name_var.get(),
-            "Description": self.server_desc_var.get(),
-            "Server ID": self.server_id_var.get(),
-            "Port": self.server_port_var.get()
+            "Server Name": self.saved_wizard_data.get('server_name', "My Minecraft Server"),
+            "Description": self.saved_wizard_data.get('server_desc', "A Minecraft Server"),
+            "Server ID": self.saved_wizard_data.get('server_id', "main"),
+            "Port": self.saved_wizard_data.get('server_port', "25565")
         }
 
         for label, value in basic_info.items():
             info_text = f"{label}: {value}"
             info_label = tki.CTkLabel(summary_frame, text=info_text)
-            info_label.pack(anchor="w", padx=20)
+            info_label.pack(anchor="w", padx=15)  # REDUCED PADDING
 
         # Software Information
         software_title = tki.CTkLabel(summary_frame, text="Server Software",
                                     font=tki.CTkFont(size=16, weight="bold"))
-        software_title.pack(anchor="w", pady=(20, 5))
+        software_title.pack(anchor="w", pady=(15, 4), padx=5)  # REDUCED PADDING
 
         software_info = {
-            "Software Type": self.server_type_var.get().title(),
-            "Minecraft Version": self.version_var.get(),
-            "EULA Accepted": "Yes" if self.eula_var.get() else "No"
+            "Software Type": self.server_type_var.get().title() if hasattr(self, 'server_type_var') else "Purpur",
+            "Minecraft Version": self.version_var.get() if hasattr(self, 'version_var') else "Unknown",
+            "EULA Accepted": "Yes" if hasattr(self, 'eula_var') and self.eula_var.get() else "No"
         }
 
         for label, value in software_info.items():
             info_text = f"{label}: {value}"
             info_label = tki.CTkLabel(summary_frame, text=info_text)
-            info_label.pack(anchor="w", padx=20)
+            info_label.pack(anchor="w", padx=15)  # REDUCED PADDING
 
         # Performance Settings
         perf_title = tki.CTkLabel(summary_frame, text="Performance Settings",
                                 font=tki.CTkFont(size=16, weight="bold"))
-        perf_title.pack(anchor="w", pady=(20, 5))
+        perf_title.pack(anchor="w", pady=(15, 4), padx=5)  # REDUCED PADDING
 
         perf_info = {
-            "Memory Allocation": f"{self.memory_var.get()} MB",
-            "Maximum Players": self.max_players_var.get(),
-            "View Distance": self.view_distance_var.get(),
-            "Default Gamemode": self.gamemode_var.get().title(),
-            "Difficulty": self.difficulty_var.get().title()
+            "Memory Allocation": f"{self.memory_var.get() if hasattr(self, 'memory_var') else '2048'} MB",
+            "Maximum Players": self.max_players_var.get() if hasattr(self, 'max_players_var') else "20",
+            "View Distance": self.view_distance_var.get() if hasattr(self, 'view_distance_var') else "10",
+            "Default Gamemode": self.gamemode_var.get().title() if hasattr(self, 'gamemode_var') else "Survival",
+            "Difficulty": self.difficulty_var.get().title() if hasattr(self, 'difficulty_var') else "Normal"
         }
 
         for label, value in perf_info.items():
             info_text = f"{label}: {value}"
             info_label = tki.CTkLabel(summary_frame, text=info_text)
-            info_label.pack(anchor="w", padx=20)
+            info_label.pack(anchor="w", padx=15, pady=2)  # REDUCED PADDING
 
         # Backup Settings
         backup_title = tki.CTkLabel(summary_frame, text="Backup Settings",
                                   font=tki.CTkFont(size=16, weight="bold"))
-        backup_title.pack(anchor="w", pady=(20, 5))
+        backup_title.pack(anchor="w", pady=(15, 4), padx=5)  # REDUCED PADDING
+
+        # Safely access backup settings
+        auto_backup = self.auto_backup_var.get() if hasattr(self, 'auto_backup_var') else True
+        backup_freq = self.backup_freq_var.get() if hasattr(self, 'backup_freq_var') else "24"
+        max_backups = self.max_backups_var.get() if hasattr(self, 'max_backups_var') else "10"
 
         backup_info = {
-            "Automatic Backups": "Enabled" if self.auto_backup_var.get() else "Disabled",
-            "Backup Frequency": f"Every {self.backup_freq_var.get()} hours" if self.auto_backup_var.get() else "N/A",
-            "Maximum Backups": self.max_backups_var.get() if self.auto_backup_var.get() else "N/A"
+            "Automatic Backups": "Enabled" if auto_backup else "Disabled",
+            "Backup Frequency": f"Every {backup_freq} hours" if auto_backup else "N/A",
+            "Maximum Backups": max_backups if auto_backup else "N/A"
         }
 
         for label, value in backup_info.items():
             info_text = f"{label}: {value}"
             info_label = tki.CTkLabel(summary_frame, text=info_text)
-            info_label.pack(anchor="w", padx=20)
+            info_label.pack(anchor="w", padx=15, pady=2)  # REDUCED PADDING
 
         # Security Settings
         security_title = tki.CTkLabel(summary_frame, text="Security Settings",
                                     font=tki.CTkFont(size=16, weight="bold"))
-        security_title.pack(anchor="w", pady=(20, 5))
+        security_title.pack(anchor="w", pady=(15, 4), padx=5)  # REDUCED PADDING
+
+        # Show whitelist info
+        whitelist_enabled = self.whitelist_var.get() if hasattr(self, 'whitelist_var') else False
+        whitelist_players = self.whitelist_players if hasattr(self, 'whitelist_players') else []
+        whitelist_players_count = len(whitelist_players)
+        pvp_enabled = self.pvp_var.get() if hasattr(self, 'pvp_var') else True
 
         security_info = {
-            "Online Mode": "Enabled (secure)" if self.online_mode_var.get() else "Disabled (insecure)",
-            "PvP": "Enabled" if self.pvp_var.get() else "Disabled"
+            "PvP": "Enabled" if pvp_enabled else "Disabled",
+            "Whitelist": f"{'Enabled' if whitelist_enabled else 'Disabled'} ({whitelist_players_count} players)"
         }
 
         for label, value in security_info.items():
             info_text = f"{label}: {value}"
             info_label = tki.CTkLabel(summary_frame, text=info_text)
-            info_label.pack(anchor="w", padx=20)
+            info_label.pack(anchor="w", padx=15, pady=2)  # REDUCED PADDING
+
+        # Whitelist players list if enabled
+        if whitelist_enabled and whitelist_players_count > 0:
+            whitelist_players_title = tki.CTkLabel(summary_frame, text="Whitelist Players:",
+                                                font=tki.CTkFont(weight="bold"))
+            whitelist_players_title.pack(anchor="w", padx=15, pady=(8, 4))  # REDUCED PADDING
+
+            players_text = ", ".join(whitelist_players)
+            whitelist_players_label = tki.CTkLabel(summary_frame, text=players_text, wraplength=400)
+            whitelist_players_label.pack(anchor="w", padx=20)  # REDUCED PADDING
 
         # Final note
         final_note = tki.CTkLabel(summary_frame,
                                 text="Click 'Create Server' to download and configure the server with these settings.",
-                                wraplength=600)
-        final_note.pack(anchor="w", pady=(20, 0))
+                                wraplength=500)
+        final_note.pack(anchor="w", pady=(15, 0), padx=5)  # REDUCED PADDING
 
     # Create server
     def create_server(self):
@@ -838,7 +1248,7 @@ class MCManager(tki.CTk):
         # Start server creation in a separate thread
         threading.Thread(target=self._create_server_thread, daemon=True).start()
 
-    def _create_server_thread(self):
+    def _create_server_thread(self):  # sourcery skip: extract-method
         """Thread to handle server creation process"""
         import os
         import requests
@@ -1002,9 +1412,7 @@ class MCManager(tki.CTk):
             builds = response.json()["builds"]
             latest_build = builds[-1]  # Get the latest build
 
-            # Get download URL for the latest build
-            download_url = f"https://api.papermc.io/v2/projects/paper/versions/{mc_version}/builds/{latest_build}/downloads/paper-{mc_version}-{latest_build}.jar"
-            return download_url
+            return f"https://api.papermc.io/v2/projects/paper/versions/{mc_version}/builds/{latest_build}/downloads/paper-{mc_version}-{latest_build}.jar"
 
         elif server_type == "purpur":
             # Purpur has a simpler versioning scheme
@@ -1021,8 +1429,10 @@ class MCManager(tki.CTk):
             "view-distance": self.view_distance_var.get(),
             "gamemode": self.gamemode_var.get(),
             "difficulty": self.difficulty_var.get(),
-            "online-mode": str(self.online_mode_var.get()).lower(),
+            "online-mode": "true",  # Always set to true
             "pvp": str(self.pvp_var.get()).lower(),
+            "white-list": str(self.whitelist_var.get()).lower(),  # Add whitelist setting
+            "enforce-whitelist": str(self.whitelist_var.get()).lower(),  # Add enforce whitelist
             "enable-command-block": "false",
             "spawn-protection": "16",
             "allow-nether": "true",
@@ -1038,6 +1448,13 @@ class MCManager(tki.CTk):
             f.write("# Generated by MC Manager\n")
             for key, value in properties.items():
                 f.write(f"{key}={value}\n")
+
+        # Create whitelist.json if whitelist is enabled
+        if hasattr(self, 'whitelist_var') and self.whitelist_var.get() and hasattr(self, 'whitelist_players') and self.whitelist_players:
+            import json
+            whitelist = [{"name": player, "uuid": ""} for player in self.whitelist_players]
+            with open(os.path.join(server_dir, "whitelist.json"), "w") as f:
+                json.dump(whitelist, f, indent=2)
 
     # Import server
     def import_existing_server(self):
@@ -1083,7 +1500,7 @@ class MCManager(tki.CTk):
         tki.CTkButton(buttons_frame, text="Import",
                     command=lambda: self._do_import_server(source_dir)).grid(row=0, column=1, padx=10)
 
-    def _do_import_server(self, source_dir):
+    def _do_import_server(self, source_dir):  # sourcery skip: low-code-quality
         """Perform the actual server import"""
         import os
         import shutil
@@ -1211,14 +1628,22 @@ class MCManager(tki.CTk):
     def change_server(self, server_name):
         """Change the current selected server"""
         self.current_server = Server(server_name)
-        self.update_dashboard()
-        self.update_console()
-        self.update_players()
-        self.update_plugins()
 
         # Add this line to load settings when a server is selected
         self.load_server_settings()
         self.load_optimization_settings()
+
+        if '-nogui' in self.args:
+            return
+        try:
+            self.update_dashboard()
+            self.update_console()
+            self.update_players()
+            self.update_plugins()
+
+
+        except Exception as e:
+            self.show_notification(f"Error changing server: {str(e)}", "error")
 
     def start_server(self):
         """Start the selected server with conflict detection"""
@@ -1228,6 +1653,8 @@ class MCManager(tki.CTk):
         # Check if server port is already in use
         port = int(self.current_server.get_port())
         if self.is_port_in_use(port):
+            if '-nogui' in self.args:
+                exit(f"Port {port} is already in use. Please check for other running servers.")
             self.show_notification(
                 f"Port {port} is already in use. Please check for other running servers.",
                 "warning"
@@ -1236,7 +1663,14 @@ class MCManager(tki.CTk):
 
         # Now safe to start the server
         self.current_server.start()
-        self.update_dashboard()
+
+        if '-nogui' in self.args:
+            return
+
+        try:
+            self.update_dashboard()
+        except Exception:
+            ...
 
     def stop_server(self):
         """Stop the selected server"""
@@ -1250,7 +1684,7 @@ class MCManager(tki.CTk):
             self.current_server.restart()
             self.update_dashboard()
 
-    def load_server_settings(self):
+    def load_server_settings(self):  # sourcery skip: low-code-quality
         """Load server settings from config file"""
         if not hasattr(self, 'current_server') or not self.current_server:
             return
@@ -1333,7 +1767,7 @@ class MCManager(tki.CTk):
         else:
             print('Config file not found, using default settings')
 
-    def apply_settings_to_ui(self):
+    def apply_settings_to_ui(self):  # sourcery skip: low-code-quality
         """Apply loaded settings to UI widgets with debug output"""
         # Check if gamemode/difficulty are in the right categories
         general_settings = self.settings.get("general", {})
@@ -1774,36 +2208,13 @@ class MCManager(tki.CTk):
     def update_players_list(self):
         """Update the list of online players"""
         if hasattr(self, 'current_server') and self.current_server:
-            # Clear current player widgets
-            for widget in self.players_list.winfo_children():
-                widget.destroy()
-
-            # Get current players and max players
+            # Update player count label
             players = self.current_server.get_players()
             max_players = self.current_server.get_max_players()
-
-            # Update the player count label
             self.player_count_label.configure(text=f"Online Players: {len(players)}/{max_players}")
 
-            # Add player entries
-            if players:
-                for i, player in enumerate(players):
-                    player_frame = tki.CTkFrame(self.players_list)
-                    player_frame.grid(row=i, column=0, padx=5, pady=5, sticky="ew")
-
-                    player_label = tki.CTkLabel(player_frame, text=player)
-                    player_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-
-                    kick_btn = tki.CTkButton(player_frame, text="Kick", width=70,
-                                           command=lambda p=player: self.kick_player(p))
-                    kick_btn.grid(row=0, column=1, padx=5, pady=5)
-
-                    ban_btn = tki.CTkButton(player_frame, text="Ban", width=70,
-                                          command=lambda p=player: self.ban_player(p))
-                    ban_btn.grid(row=0, column=2, padx=5, pady=5)
-            else:
-                no_players = tki.CTkLabel(self.players_list, text="No players online")
-                no_players.grid(row=0, column=0, padx=10, pady=20)
+            # Use the existing update_players method which properly creates all UI elements
+            self.update_players()
 
         # Schedule next update
         self.after(1000, self.update_players_list)
@@ -1925,7 +2336,7 @@ class MCManager(tki.CTk):
             sticky="ew"
         )
 
-    def setup_settings_tab(self):
+    def setup_settings_tab(self):  # sourcery skip: low-code-quality
         """Setup the settings tab with server configuration options"""
         # Create settings frame
         self.settings_frame = tki.CTkFrame(self.settings_tab)
@@ -2408,7 +2819,7 @@ class MCManager(tki.CTk):
             traceback.print_exc()
 
     # Resource monitoring
-    def monitor_resources(self):
+    def monitor_resources(self):  # sourcery skip: low-code-quality
         """Monitor and update resource usage periodically with improved stability"""
         max_points = 60  # Store last 60 data points
         cpu_count = psutil.cpu_count()  # Get number of CPU cores
@@ -2422,6 +2833,42 @@ class MCManager(tki.CTk):
         # Track server state to detect changes
         was_running = False
         last_idx = 0  # Keep track of the last plot index
+
+        max_ram_gb = float(self.settings.get('advanced',{}).get('memory', 4096)) / 1024
+
+        if '-nogui' in self.args:
+            console = ''
+            while self.running:
+                cpu_usage = self.current_server.get_cpu()
+                ram_usage = self.current_server.get_ram()
+
+                # Log console
+                new_console = self.current_server.get_console()
+                if new_console != console:
+                    console = new_console
+                    print(console)
+
+                # Normalize CPU usage by cores and cap at 100%
+                normalized_cpu = min(100, cpu_usage / cpu_count if cpu_count > 0 else cpu_usage)
+
+                # Calculate RAM percentage and cap at 100%
+                # Ensure max_ram is never 0 to avoid division by zero
+                if max_ram_gb <= 0:
+                    # Use a reasonable default if max_ram is not available
+                    max_ram_gb = 16
+                    print(f"Warning: max_ram was 0 or negative. Set MAX ram to: {max_ram_gb} GB")
+
+                # Format RAM values for display
+                ram_gb = ram_usage / 1024
+
+                ram_pct = min(100, (ram_gb / max_ram_gb * 100))
+
+                print(f'RESOURCE USAGE | CPU: {normalized_cpu:.2f}%, RAM: {ram_pct:.2f}% ({ram_gb:.2f}/{max_ram_gb:.2f} GB)')
+
+                time.sleep(0.1)
+            return
+
+
 
         while self.running:
             try:
@@ -2437,7 +2884,6 @@ class MCManager(tki.CTk):
                         try:
                             cpu_usage = self.current_server.get_cpu()
                             ram_usage = self.current_server.get_ram()
-                            max_ram_gb = float(self.settings.get('advanced',{}).get('memory', 4096)) / 1024
 
                             # Normalize CPU usage by cores and cap at 100%
                             normalized_cpu = min(100, cpu_usage / cpu_count if cpu_count > 0 else cpu_usage)
@@ -2453,8 +2899,6 @@ class MCManager(tki.CTk):
                             ram_gb = ram_usage / 1024
 
                             ram_pct = min(100, (ram_gb / max_ram_gb * 100))
-
-                            print(ram_gb, max_ram_gb)
 
                             # Update CPU value label safely
                             if hasattr(self, 'cpu_value_label') and self.running:
@@ -2493,10 +2937,9 @@ class MCManager(tki.CTk):
 
                         except Exception as e:
                             print(f"Error collecting resource data: {e}")
-                            traceback.print_exc()
 
                     elif server_state_changed:
-                        print(f"Dropping graph data.")
+                        print("Dropping graph data.")
 
                         self.cpu_data = []
                         self.cpu_times = []
@@ -2516,7 +2959,7 @@ class MCManager(tki.CTk):
                                 if hasattr(self, 'ram_value_label') else None)
 
                     # Always update plots when UI exists
-                    if all(hasattr(self, attr) for attr in ['cpu_line', 'ram_line', 'cpu_canvas', 'ram_canvas']) and self.running:
+                    if '-nogui' not in self.args and all(hasattr(self, attr) for attr in ['cpu_line', 'ram_line', 'cpu_canvas', 'ram_canvas']) and self.running:
                         try:
                             # Update the plot data
                             self.cpu_line.set_data(self.cpu_times, self.cpu_data)
@@ -2645,19 +3088,34 @@ class MCManager(tki.CTk):
         if not self.current_server:
             return
 
-        # Clear existing player frames
-        if not hasattr(self,'player_frames'):
-            return
-        for frame in self.player_frames:
-            frame.destroy()
-        self.player_frames.clear()
+        # Initialize player_frames list if it doesn't exist
+        if not hasattr(self, 'player_frames'):
+            self.player_frames = []
+
+        # Initialize previous_players set if it doesn't exist
+        if not hasattr(self, 'previous_players'):
+            self.previous_players = set()
 
         # Get current players
         players = self.current_server.get_players()
+        current_players = set(players)
 
+        # If player list hasn't changed, don't rebuild the UI
+        if current_players == self.previous_players:
+            return
+
+        # Store current players for next comparison
+        self.previous_players = current_players
+
+        # Clear existing player frames
+        for frame in self.player_frames:
+            frame.destroy()
+        self.player_frames = []
+
+        # If no players, show a message
         if not players:
             no_players_label = tki.CTkLabel(
-                self.players_list_frame,
+                self.players_list,
                 text="No players online"
             )
             no_players_label.pack(padx=20, pady=20)
@@ -2665,10 +3123,17 @@ class MCManager(tki.CTk):
             return
 
         # Add player frames
-        for i, player in enumerate(players):
-            player_frame = tki.CTkFrame(self.players_list_frame)
+        for player in players:
+            player_frame = tki.CTkFrame(self.players_list)
             player_frame.pack(fill=tki.X, padx=5, pady=5)
 
+            # Configure columns to ensure proper button placement
+            player_frame.columnconfigure(0, weight=1)  # Name takes most space
+            player_frame.columnconfigure(1, weight=0)  # Buttons take minimum space
+            player_frame.columnconfigure(2, weight=0)
+            player_frame.columnconfigure(3, weight=0)
+
+            # Player name
             player_name = tki.CTkLabel(
                 player_frame,
                 text=player,
@@ -2682,41 +3147,45 @@ class MCManager(tki.CTk):
                 sticky="w"
             )
 
+            # Control buttons with fixed width to ensure consistent layout
             kick_btn = tki.CTkButton(
                 player_frame,
                 text="Kick",
+                width=60,
                 command=lambda p=player: self.kick_player(p)
             )
             kick_btn.grid(
                 row=0,
                 column=1,
-                padx=5,
+                padx=(5, 5),
                 pady=5
             )
 
             ban_btn = tki.CTkButton(
                 player_frame,
                 text="Ban",
+                width=60,
                 fg_color="red",
                 command=lambda p=player: self.ban_player(p)
             )
             ban_btn.grid(
                 row=0,
                 column=2,
-                padx=5,
+                padx=(5, 5),
                 pady=5
             )
 
             op_btn = tki.CTkButton(
                 player_frame,
                 text="Op",
+                width=60,
                 fg_color="orange",
                 command=lambda p=player: self.op_player(p)
             )
             op_btn.grid(
                 row=0,
                 column=3,
-                padx=5,
+                padx=(5, 5),
                 pady=5
             )
 
@@ -3220,6 +3689,7 @@ class MCManager(tki.CTk):
         if result:
             self.start_server()
 
+args = sys.argv[1:]
 
-app = MCManager()
-app.mainloop()
+app = MCManager(args)
+app.run()

@@ -29,7 +29,7 @@ def is_admin():
     except:
         return False
 
-launch_args = '-Xmx<RAM>M -Xms<RAM>M -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:+UseNUMA -XX:NmethodSweepActivity=1 -XX:ReservedCodeCacheSize=400M -XX:NonNMethodCodeHeapSize=12M -XX:ProfiledCodeHeapSize=194M -XX:NonProfiledCodeHeapSize=194M -XX:-DontCompileHugeMethods -XX:MaxNodeLimit=240000 -XX:NodeLimitFudgeFactor=8000 -XX:+UseVectorCmov -XX:+PerfDisableSharedMem -XX:+UseFastUnorderedTimeStamps -XX:+UseCriticalJavaThreadPriority -XX:ThreadPriorityPolicy=1 -XX:AllocatePrefetchStyle=3  -XX:+UseG1GC -XX:MaxGCPauseMillis=37 -XX:+PerfDisableSharedMem -XX:G1HeapRegionSize=16M -XX:G1NewSizePercent=23 -XX:G1ReservePercent=20 -XX:SurvivorRatio=32 -XX:G1MixedGCCountTarget=3 -XX:G1HeapWastePercent=20 -XX:InitiatingHeapOccupancyPercent=10 -XX:G1RSetUpdatingPauseTimePercent=0 -XX:MaxTenuringThreshold=1 -XX:G1SATBBufferEnqueueingThresholdPercent=30 -XX:G1ConcMarkStepDurationMillis=5.0 -XX:G1ConcRefinementServiceIntervalMillis=150 -XX:GCTimeRatio=99'
+launch_args = '-Xmx<RAM>M -Xms<RAM>M -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:+UseNUMA -XX:NmethodSweepActivity=1 -XX:ReservedCodeCacheSize=400M -XX:NonNMethodCodeHeapSize=12M -XX:ProfiledCodeHeapSize=194M -XX:NonProfiledCodeHeapSize=194M -XX:-DontCompileHugeMethods -XX:MaxNodeLimit=240000 -XX:NodeLimitFudgeFactor=8000 -XX:+UseVectorCmov -XX:+PerfDisableSharedMem -XX:+UseFastUnorderedTimeStamps -XX:+UseCriticalJavaThreadPriority -XX:ThreadPriorityPolicy=1 -XX:AllocatePrefetchStyle=3  -XX:+UseG1GC -XX:MaxGCPauseMillis=37 -XX:+PerfDisableSharedMem -XX:G1HeapRegionSize=16M -XX:G1NewSizePercent=23 -XX:G1ReservePercent=20 -XX:SurvivorRatio=32 -XX:G1MixedGCCountTarget=3 -XX:G1HeapWastePercent=20 -XX:InitiatingHeapOccupancyPercent=10 -XX:G1RSetUpdatingPauseTimePercent=0 -XX:MaxTenuringThreshold=1 -XX:G1SATBBufferEnqueueingThresholdPercent=30 -XX:G1ConcMarkStepDurationMillis=5.0 -XX:GCTimeRatio=99'
 
 if is_admin():
     # Enable large pages, they can only be enabled with admin rights.
@@ -57,6 +57,10 @@ class Server:
         self.ram_usage = 0
         self.max_ram = max_ram # MB
 
+        # Player tracking
+        self.current_players = set()
+        self.last_player_update = 0
+
     def _find_server_jar(self):
         """Find a server jar file in the server directory"""
         jar_files = glob.glob(os.path.join(self.base_dir, "*.jar"))
@@ -64,7 +68,7 @@ class Server:
             return jar_files[0]  # Return the first jar file found
         return None
 
-    def start(self):
+    def start(self, raw=False):
         """Start the Minecraft server"""
         if self._is_running:
             return True
@@ -182,54 +186,49 @@ class Server:
             return "\n".join(self.console_output[-1000:])  # Limit to last 1000 lines
 
     def _read_console(self):
-        """Read console output from the server process"""
+        """Read console output from the server process and track player activity"""
         if not self.process:
             return
+
+        # Regex patterns for player tracking
+        join_pattern = re.compile(r'(\w+) joined the game')     # Join message
+        leave_pattern = re.compile(r'(\w+) left the game')      # Leave message
 
         try:
             for line in iter(self.process.stdout.readline, ''):
                 if not line:
                     break
 
+                # Track player joins
+                join_match = join_pattern.search(line)
+                if join_match:
+                    player_name = join_match[1]
+                    self.current_players.add(player_name.removeprefix('85m'))
+
+                # Track player leaves
+                leave_match = leave_pattern.search(line)
+                if leave_match:
+                    player_name = leave_match[1]
+                    if player_name in self.current_players:
+                        self.current_players.remove(player_name.removeprefix('85m'))
+
                 with self._console_lock:
                     self.console_output.append(line.strip())
                     # Keep console buffer at a reasonable size
                     if len(self.console_output) > 5000:
                         self.console_output = self.console_output[-4000:]
+
         except Exception as e:
             print(f"Error reading console: {str(e)}")
         finally:
             self._is_running = False
 
     def get_players(self):
-        """Get list of online players"""
+        """Get list of online players using active tracking"""
         if not self._is_running:
             return []
 
-        try:
-            players = []
-
-            # For online player detection, check multiple patterns
-            patterns = [
-                r'There are (\d+)/\d+ players online:(.*)', # Standard player list format
-                r'(\d+) of a max of \d+ players online:(.*)', # Alternative format
-                r'Online \((\d+)\):(.*)', # Another format
-            ]
-
-            # Get online players from last console output
-            for line in reversed(self.console_output[-200:]):  # Check more lines
-                for pattern in patterns:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        player_str = match.group(2).strip()
-                        if player_str and player_str.lower() != "none":
-                            players = [p.strip() for p in player_str.split(',')]
-                        return players  # Return on first match
-
-            return players
-        except Exception as e:
-            print(f"Error getting players: {str(e)}")
-            return []
+        return list(self.current_players)
 
     def get_max_players(self):
         """Get the maximum number of players allowed"""
@@ -328,9 +327,10 @@ class Server:
                         try:
                             self.cpu_usage += child.cpu_percent(interval=0)
                             self.ram_usage += child.memory_info().rss / (1024 * 1024)
-                        except:
+                        except Exception:
                             pass
-            except:
+
+            except Exception:
                 pass
 
             time.sleep(max(0,0.5-(time.time()-start)))  # Sleep to maintain loop interval
