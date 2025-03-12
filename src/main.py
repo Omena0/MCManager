@@ -1,11 +1,12 @@
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter.filedialog as filedialog
 from validators import Validators
 import matplotlib.pyplot as plt
 import customtkinter as tki
 from servers import Server
-import matplotlib
 import threading
 import traceback
+import requests
 import psutil
 import time
 import json
@@ -14,8 +15,10 @@ import os
 
 #matplotlib.use("TkAgg")  # Set the backend for matplotlib
 
+tki.set_appearance_mode('dark')
+
 class MCManager(tki.CTk):
-    def __init__(self, args:list=None):
+    def __init__(self, args:list[str] | None = None):
 
         if args is None:
             args = []
@@ -23,7 +26,22 @@ class MCManager(tki.CTk):
         self.args = args
         self.servers = self.get_server_list()
 
+        if '-install' in args:
+            argCount = 0
+            install_index = args.index('-install')
+            i = install_index + 1
+            while i < len(args) and not args[i].startswith('-'):
+                argCount += 1
+                i += 1
+
+            name = args[args.index('-install')+1]
+            software = args[args.index('-install')+2] if argCount >= 2 else 'purpur'
+            version = args[args.index('-install')+3] if argCount >= 3 else '1.21.4'
+            print(f'Creating server: {name}. Version: {software} {version}')
+            self._create_server_thread(name, software, version)
+
         if '-autostart' in args:
+            self.servers = self.get_servers_list()
             server_id = args[args.index('-autostart')+1]
             if server_id in self.servers:
                 self.change_server(server_id)
@@ -229,7 +247,7 @@ class MCManager(tki.CTk):
             self.change_server(self.servers[0])
             self.server_option.set(self.servers[0])
         else:
-            self.current_server = None
+            self.current_server: Server | None = None
 
     def show_no_servers_ui(self):
         """Display UI for when no servers are configured - MORE COMPACT"""
@@ -1248,24 +1266,27 @@ class MCManager(tki.CTk):
         # Start server creation in a separate thread
         threading.Thread(target=self._create_server_thread, daemon=True).start()
 
-    def _create_server_thread(self):  # sourcery skip: extract-method
+    def _create_server_thread(
+            self,
+            server_name=None,
+            server_type=None,
+            mc_version=None,
+            server_port=None,
+            memory=4096,
+            backup=None
+        ):  # sourcery skip: extract-method
         """Thread to handle server creation process"""
-        import os
-        import requests
-        import zipfile
-        import shutil
-        import json
-        import time
 
         try:
-            # Get values from wizard
-            server_name = self.server_name_var.get()
+            if '-nogui' not in self.args:
+                # Get values from wizard
+                server_name = self.server_name_var.get()
+                server_type = self.server_type_var.get()
+                mc_version = self.version_var.get()
             server_folder_name = "".join(c if c.isalnum() or c in ['-', '_'] else '_' for c in server_name)
-            server_type = self.server_type_var.get()
-            mc_version = self.version_var.get()
 
             # Update status
-            self._update_status("Creating server directory", 0.05)
+            self._update_status("Creating server directory", 0.01)
 
             # Create server directory
             base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "servers"))
@@ -1284,7 +1305,7 @@ class MCManager(tki.CTk):
             os.makedirs(server_dir)
 
             # Update status
-            self._update_status(f"Downloading {server_type} {mc_version}", 0.10)
+            self._update_status(f"Downloading {server_type} {mc_version}", 0.02)
 
             # Download server jar
             jar_url = self._get_download_url(server_type, mc_version)
@@ -1299,17 +1320,17 @@ class MCManager(tki.CTk):
                     f.write(data)
                     downloaded += len(data)
                     if total_size > 0:
-                        progress = 0.10 + (downloaded / total_size) * 0.40
+                        progress = 0.02 + (downloaded / total_size) * 0.80
                         self._update_status(f"Downloading: {downloaded / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB", progress)
 
             # Update status
-            self._update_status("Creating server.properties", 0.55)
+            self._update_status("Creating server.properties", 0.85)
 
             # Create server.properties
             self._create_server_properties(server_dir)
 
             # Update status
-            self._update_status("Creating eula.txt", 0.60)
+            self._update_status("Creating eula.txt", 0.90)
 
             # Create eula.txt
             with open(os.path.join(server_dir, "eula.txt"), "w") as f:
@@ -1317,23 +1338,40 @@ class MCManager(tki.CTk):
                 f.write("eula=true\n")
 
             # Update status
-            self._update_status("Creating server configuration", 0.65)
+            self._update_status("Creating server configuration", 0.98)
 
-            # Save server config
-            config = {
-                "name": server_name,
-                "description": self.server_desc_var.get(),
-                "server_id": self.server_id_var.get(),
-                "port": self.server_port_var.get(),
-                "server_type": server_type,
-                "version": mc_version,
-                "memory": self.memory_var.get(),
-                "backup": {
-                    "enabled": self.auto_backup_var.get(),
-                    "frequency": int(self.backup_freq_var.get()),
-                    "max_backups": self.max_backups_var.get()
+            if '-nogui' not in self.args:
+                # Save server config
+                config = {
+                    "name": server_name,
+                    "description": self.server_desc_var.get(),
+                    "server_id": self.server_id_var.get(),
+                    "port": self.server_port_var.get(),
+                    "server_type": server_type,
+                    "version": mc_version,
+                    "memory": self.memory_var.get(),
+                    "backup": {
+                        "enabled": self.auto_backup_var.get(),
+                        "frequency": int(self.backup_freq_var.get()),
+                        "max_backups": self.max_backups_var.get()
+                    }
                 }
-            }
+
+            else:
+                config = {
+                    "name": server_name,
+                    "description": "No description",
+                    "server_id": server_name,
+                    "port": server_port,
+                    "server_type": server_type,
+                    "version": mc_version,
+                    "memory": memory,
+                    "backup": {
+                        "enabled": bool(backup) if backup else False,
+                        "frequency": float(backup.split('|')[0]) if backup else 24.0,
+                        "max_backups": backup.split('|')[1] if backup else 10
+                    }
+                }
 
             with open(os.path.join(server_dir, "server_config.json"), "w") as f:
                 json.dump(config, f, indent=2)
@@ -1345,20 +1383,29 @@ class MCManager(tki.CTk):
             # Update status
             self._update_status("Server creation complete!", 1.0)
 
-            # Add log entry
-            self._add_log(f"Server '{server_name}' created successfully in {server_dir}")
-            self._add_log("You can now start the server from the main interface.")
+            time.sleep(0.3)
 
-            # Wait a moment for user to see completion
-            time.sleep(2)
+            self.servers = self.get_server_list()
+            self.change_server(server_name)
 
-            # Close progress window and refresh UI
-            self.after(0, self._server_creation_completed, server_folder_name)
+            if '-nogui' not in self.args:
+                # Add log entry
+                self._add_log(f"Server '{server_name}' created successfully in {server_dir}")
+                self._add_log("You can now start the server from the main interface.")
+
+                # Wait a moment for user to see completion
+                time.sleep(2)
+
+                # Close progress window and refresh UI
+                self.after(0, self._server_creation_completed, server_folder_name)
 
         except Exception as e:
-            self._add_log(f"Error: {str(e)}")
-            self._update_status(f"Error: {str(e)}", 0)
-            self.after(0, lambda: self.show_notification(f"Server creation failed: {str(e)}", "error"))
+            if '-nogui' not in self.args:
+                self._add_log(f"Error: {str(e)}")
+                self._update_status(f"Error: {str(e)}", 0)
+                self.after(0, lambda: self.show_notification(f"Server creation failed: {str(e)}", "error"))
+            else:
+                print(f'Error: {e}')
 
     def _server_creation_completed(self, server_name):
         """Called when server creation is complete"""
@@ -1389,7 +1436,10 @@ class MCManager(tki.CTk):
             self.progress_bar.set(progress_value)
             self._add_log(message)
 
-        self.after(0, update_ui)
+        if '-nogui' not in self.args:
+            self.after(0, update_ui)
+        else:
+            print(message, f'{progress_value*100:.2f}%')
 
     def _add_log(self, message):
         """Add message to log"""
@@ -1422,46 +1472,47 @@ class MCManager(tki.CTk):
 
     def _create_server_properties(self, server_dir):
         """Create server.properties file with wizard settings"""
-        properties = {
-            "server-port": self.server_port_var.get(),
-            "motd": self.server_desc_var.get(),
-            "max-players": self.max_players_var.get(),
-            "view-distance": self.view_distance_var.get(),
-            "gamemode": self.gamemode_var.get(),
-            "difficulty": self.difficulty_var.get(),
-            "online-mode": "true",  # Always set to true
-            "pvp": str(self.pvp_var.get()).lower(),
-            "white-list": str(self.whitelist_var.get()).lower(),  # Add whitelist setting
-            "enforce-whitelist": str(self.whitelist_var.get()).lower(),  # Add enforce whitelist
-            "enable-command-block": "false",
-            "spawn-protection": "16",
-            "allow-nether": "true",
-            "spawn-monsters": "true",
-            "spawn-animals": "true",
-            "spawn-npcs": "true",
-            "hardcore": "false",
-            "level-name": "world"
-        }
+        if '-nogui' not in self.args and '-install' not in self.args:
+            properties = {
+                "server-port": self.server_port_var.get(),
+                "motd": self.server_desc_var.get(),
+                "max-players": self.max_players_var.get(),
+                "view-distance": self.view_distance_var.get(),
+                "gamemode": self.gamemode_var.get(),
+                "difficulty": self.difficulty_var.get(),
+                "online-mode": "true",  # Always set to true
+                "pvp": str(self.pvp_var.get()).lower(),
+                "white-list": str(self.whitelist_var.get()).lower(),  # Add whitelist setting
+                "enforce-whitelist": str(self.whitelist_var.get()).lower(),  # Add enforce whitelist
+                "enable-command-block": "false",
+                "spawn-protection": "0",
+                "allow-nether": "true",
+                "spawn-monsters": "true",
+                "spawn-animals": "true",
+                "spawn-npcs": "true",
+                "hardcore": "false",
+                "level-name": "world"
+            }
 
-        # Write the properties file
-        with open(os.path.join(server_dir, "server.properties"), "w") as f:
-            f.write("# Generated by MC Manager\n")
-            for key, value in properties.items():
-                f.write(f"{key}={value}\n")
+            # Write the properties file
+            with open(os.path.join(server_dir, "server.properties"), "w") as f:
+                f.write("# Generated by MC Manager\n")
+                for key, value in properties.items():
+                    f.write(f"{key}={value}\n")
 
-        # Create whitelist.json if whitelist is enabled
-        if hasattr(self, 'whitelist_var') and self.whitelist_var.get() and hasattr(self, 'whitelist_players') and self.whitelist_players:
-            import json
-            whitelist = [{"name": player, "uuid": ""} for player in self.whitelist_players]
-            with open(os.path.join(server_dir, "whitelist.json"), "w") as f:
-                json.dump(whitelist, f, indent=2)
+            # Create whitelist.json if whitelist is enabled
+            if (hasattr(self, 'whitelist_var')
+                    and self.whitelist_var.get()
+                    and hasattr(self, 'whitelist_players')
+                    and self.whitelist_players
+                ):
+                whitelist = [{"name": player, "uuid": ""} for player in self.whitelist_players]
+                with open(os.path.join(server_dir, "whitelist.json"), "w") as f:
+                    json.dump(whitelist, f, indent=2)
 
     # Import server
     def import_existing_server(self):
         """Import an existing server directory"""
-        import tkinter.filedialog as filedialog
-        import os
-        import shutil
 
         # Ask user to select directory containing their server
         source_dir = filedialog.askdirectory(title="Select Server Directory")
@@ -1502,9 +1553,6 @@ class MCManager(tki.CTk):
 
     def _do_import_server(self, source_dir):  # sourcery skip: low-code-quality
         """Perform the actual server import"""
-        import os
-        import shutil
-        import json
 
         try:
             server_name = self.import_name_var.get().strip()
@@ -3555,20 +3603,20 @@ class MCManager(tki.CTk):
             self.current_server.send_command(f"kick {player_name}")
             self.after(500, self.update_players)  # Update player list after a delay
 
-    def ban_player(self, player_name):
+    def ban_player(self, player_name:str):
         """Ban a player from the server"""
         if self.current_server and self.current_server.is_running():
             self.current_server.send_command(f"ban {player_name}")
             self.after(500, self.update_players)
 
-    def op_player(self, player_name):
+    def op_player(self, player_name:str):
         """Give operator status to a player"""
         if self.current_server and self.current_server.is_running():
             self.current_server.send_command(f"op {player_name}")
             self.show_notification(f"Player {player_name} is now an operator")
 
     # Plugin management methods
-    def enable_plugin(self, plugin_name):
+    def enable_plugin(self, plugin_name:str):
         """Enable a plugin"""
         if self.current_server and self.current_server.is_running():
             result = self.current_server.enable_plugin(plugin_name)
@@ -3578,7 +3626,7 @@ class MCManager(tki.CTk):
             else:
                 self.show_notification(f"Failed to enable plugin {plugin_name}", "error")
 
-    def disable_plugin(self, plugin_name):
+    def disable_plugin(self, plugin_name:str):
         """Disable a plugin"""
         if self.current_server and self.current_server.is_running():
             result = self.current_server.disable_plugin(plugin_name)
@@ -3588,7 +3636,7 @@ class MCManager(tki.CTk):
             else:
                 self.show_notification(f"Failed to disable plugin {plugin_name}", "error")
 
-    def delete_plugin(self, plugin_name):
+    def delete_plugin(self, plugin_name:str):
         """Delete a plugin"""
         import tkinter.messagebox as messagebox
 
@@ -3605,7 +3653,7 @@ class MCManager(tki.CTk):
                 self.show_notification(f"Failed to delete plugin {plugin_name}", "error")
 
     # Backup management methods
-    def restore_backup(self, backup_name):
+    def restore_backup(self, backup_name:str):
         """Restore a server backup"""
         import tkinter.messagebox as messagebox
 
@@ -3626,7 +3674,7 @@ class MCManager(tki.CTk):
         else:
             self._do_restore_backup(backup_name)
 
-    def _do_restore_backup(self, backup_name):
+    def _do_restore_backup(self, backup_name:str):
         """Internal method to restore backup after server is stopped"""
         # Show progress dialog
         self.restore_progress = tki.CTkToplevel(self)
@@ -3661,7 +3709,7 @@ class MCManager(tki.CTk):
 
         threading.Thread(target=do_restore, daemon=True).start()
 
-    def delete_backup(self, backup_name):
+    def delete_backup(self, backup_name:str):
         """Delete a server backup"""
         import tkinter.messagebox as messagebox
 
