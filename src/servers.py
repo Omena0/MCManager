@@ -35,6 +35,7 @@ launch_args = '-Xmx<RAM>M -Xms<RAM>M -XX:+UnlockExperimentalVMOptions -XX:+Unloc
 # Enable large pages, as they require administrators.
 if is_admin():
     launch_args += ' -XX:+UseLargePages -XX:LargePageSizeInBytes=2m'
+    print('Enabling large pages because we are running as admin.')
 
 
 class Server:
@@ -89,13 +90,9 @@ class Server:
                     f.write("eula=true\n")
 
             # Get memory settings from server.properties or use default
-            memory = self._get_memory_setting()            # Find Java executable
-            java_path = self._find_java_executable()
-            if not java_path:
-                # This is a fallback error message when automatic download fails
-                raise FileNotFoundError(
-                    "Java executable not found and automatic download failed. Please run 'python src/java_downloader.py' to install portable Java, or manually install Java JDK 21"
-                )
+            memory = self._get_memory_setting()
+
+            print(f'Starting server with {memory} MB')
 
             # Build Java command
             cmd = [
@@ -161,7 +158,7 @@ class Server:
             if self.process:
                 try:
                     self.process.kill()
-                except:
+                except Exception:
                     pass
             self._is_running = False
             return False
@@ -177,7 +174,7 @@ class Server:
         """Check if the server is running"""
         return self._is_running
 
-    def send_command(self, command):
+    def send_command(self, command:str):
         """Send a command to the server console"""
         if not self._is_running or not self.process:
             return False
@@ -308,23 +305,23 @@ class Server:
 
     def _get_memory_setting(self):
         """Get memory allocation from config or use default"""
+        if not hasattr(self, 'max_ram'):
+            self.max_ram = 4096
         try:
             # Check for custom memory setting
             config_file = os.path.join(self.base_dir, "server_config.json")
             if os.path.exists(config_file):
                 with open(config_file, 'r') as f:
                     config = json.load(f)
-                    if "memory" in config:
-                        memory = int(config["memory"])
+                    if "memory" in config['advanced']:
+                        memory = int(config["advanced"]["memory"])
                         self.max_ram = memory
                         return memory
 
             # Default to 4GB
-            self.max_ram = 4096
-            return 4096
-        except:
-            self.max_ram = 4096
-            return 4096
+        except Exception:
+            ...
+        return self.max_ram
 
     def _start_monitor(self):
         """Start monitoring server resources"""
@@ -358,6 +355,11 @@ class Server:
                 pass
 
             time.sleep(max(0,0.5-(time.time()-start)))  # Sleep to maintain loop interval
+
+        try:
+            self.process.terminate()
+        except Exception:
+            ...
 
     def get_cpu(self):
         """Get server CPU usage percentage"""

@@ -4,39 +4,81 @@ from validators import Validators
 import matplotlib.pyplot as plt
 import customtkinter as tki
 from servers import Server
+import dns.resolver
+import subprocess
 import threading
 import traceback
 import requests
+import socket
 import psutil
 import shutil
 import time
 import json
 import sys
 import os
-
-# Add java_downloader import
-try:
-    from java_downloader import download_portable_java
-except ImportError:
-    download_portable_java = None
+import re
 
 tki.set_appearance_mode('dark')
 
+def _resolve_hostname(hostname):
+    """More robust hostname resolution using multiple DNS servers"""
+
+    # Try system's default DNS first
+    try:
+        ip_address = socket.gethostbyname(hostname)
+        return ip_address
+    except socket.gaierror:...
+
+    # Try multiple public DNS resolvers if system DNS fails
+    dns_servers = [
+        '1.1.1.1',       # Cloudflare
+        '8.8.8.8',       # Google
+        '9.9.9.9',       # Quad9
+        '208.67.222.222' # OpenDNS
+    ]
+
+    for dns_server in dns_servers:
+        try:
+            # Create a resolver using the specific DNS server
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = [dns_server]
+
+            # Query A record
+            answers = resolver.query(hostname, 'A')
+            for rdata in answers:
+                ip_address = str(rdata)
+                return ip_address
+        except Exception: ...
+
+    # If all DNS resolvers fail, try a HTTP-based DNS lookup
+    try:
+        import requests
+        response = requests.get(f"https://dns.google/resolve?name={hostname}")
+        if response.status_code == 200:
+            data = response.json()
+            if "Answer" in data:
+                for answer in data["Answer"]:
+                    if answer["type"] == 1:  # Type A record
+                        ip_address = answer["data"]
+                        return ip_address
+    except Exception: ...
+
+    # If all attempts fail
+    return None
+
 class MCManager(tki.CTk):
     def __init__(self, args:list[str] | None = None):
+        # sourcery skip: low-code-quality
+        self.tk_running = False
 
         if args is None:
             args = []
 
+        if '-nogui' not in args:
+           super().__init__()
+
         self.args = args
         self.servers = self.get_server_list()
-
-        # Handle Java installation through command line
-        if '-install-java' in args:
-            self._install_java()
-            # Exit after Java installation if no GUI is requested
-            if '-nogui' in args:
-                sys.exit(0)
 
         if '-install' in args:
             argCount = 0
@@ -46,26 +88,28 @@ class MCManager(tki.CTk):
                 argCount += 1
                 i += 1
 
-            name = args[args.index('-install')+1]
+            name = args[args.index('-install')+1] if argCount >= 1 else 'server'
             software = args[args.index('-install')+2] if argCount >= 2 else 'purpur'
             version = args[args.index('-install')+3] if argCount >= 3 else '1.21.4'
-            print(f'Creating server: {name}. Version: {software} {version}')
-            self._create_server_thread(name, software, version)
+            port = args[args.index('-install')+4] if argCount >= 4 else '25565'
+            memory = int(args[args.index('-install')+5]) if argCount >= 5 else 4096
+            backup_str = args[args.index('-install')+6] if argCount >= 6 else None
 
-        if '-autostart' in args:
-            self.servers = self.get_servers_list()
-            server_id = args[args.index('-autostart')+1]
-            if server_id in self.servers:
-                self.change_server(server_id)
-                self.start_server()
-            else:
-                exit(f'Error: No such server: {server_id}')
+            print(f'Creating server: {name}. Version: {software} {version}')
+            self._create_server_thread(name, software, version, port, memory, backup_str)
 
         if '-nogui' in args:
+            if '-autostart' in args:
+                self.servers = self.get_server_list()
+                server_id = args[args.index('-autostart')+1]
+
+                if server_id in self.servers:
+                    self.current_server = Server(server_id)
+                    self.start_server()
+                else:
+                    exit(f'Error: No such server: {server_id}')
             self.running = True
             return
-
-        super().__init__()
 
         self.running = False
 
@@ -91,12 +135,32 @@ class MCManager(tki.CTk):
             self.monitor_thread = threading.Thread(target=self.monitor_resources)
             self.monitor_thread.daemon = True
             self.monitor_thread.start()
+            if '-autostart' in args:
+                server_id = args[args.index('-autostart')+1]
+
+                if server_id in self.servers:
+                    self.change_server(server_id)
+                    self.start_server()
+                else:
+                    exit(f'Error: No such server: {server_id}')
 
     def run(self):
         if '-nogui' not in self.args:
             self.mainloop()
         else:
-            self.monitor_resources()
+            self.monitor_thread = threading.Thread(target=self.monitor_resources,daemon=True)
+            self.monitor_thread.start()
+
+            while self.running:
+                command = input('')
+                self.current_server.send_command(command)
+
+    def mainloop(self, *args, **kwargs):
+        self.tk_running = True
+        try:
+            return super().mainloop(*args, **kwargs)
+        finally:
+            self.tk_running = False
 
     def on_closing(self):
         """Handle application shutdown properly - with FORCED silent exit"""
@@ -105,7 +169,12 @@ class MCManager(tki.CTk):
 
         try:
             self.current_server.stop()
-        except: ...
+        except Exception:
+            ...
+        try:
+            self.ngrok_process.terminate()
+        except Exception:
+            ...
 
         # First redirect both stdout and stderr to null device
         sys.stdout = open(os.devnull, 'w')
@@ -133,7 +202,6 @@ class MCManager(tki.CTk):
 
         # Use os._exit for immediate termination without cleanup
         os._exit(0)  # This is more forceful than sys.exit()
-
     def initialize_main_ui(self):
         """Initialize the main application UI with server management"""
         # Configure grid - Assign weights to columns with much greater difference
@@ -224,6 +292,16 @@ class MCManager(tki.CTk):
             fg_color="orange"
         )
         self.restart_button.grid(row=1, column=0, columnspan=2, padx=3, pady=3, sticky="ew")
+
+        # Add in the control_frame section in initialize_main_ui after the restart_button
+        self.tunnel_button = tki.CTkButton(
+            self.control_frame,
+            text="Start tunnel",
+            height=28,
+            command=self.start_tunnel,
+            fg_color="purple"
+        )
+        self.tunnel_button.grid(row=2, column=0, columnspan=2, padx=3, pady=3, sticky="ew")
 
         # Create main content area with tabview - REDUCED PADDING
         self.tabview = tki.CTkTabview(self, corner_radius=6)
@@ -425,7 +503,7 @@ class MCManager(tki.CTk):
         # Step 2 (performance): Save memory and other settings
         if self.current_step == 2:
             if hasattr(self, 'memory_var'):
-                self.saved_wizard_data['memory'] = self.memory_var.get()
+                self.saved_wizard_data['advanced']['memory'] = self.memory_var.get()
             if hasattr(self, 'max_players_var'):
                 self.saved_wizard_data['max_players'] = self.max_players_var.get()
             if hasattr(self, 'view_distance_var'):
@@ -791,7 +869,7 @@ class MCManager(tki.CTk):
         # Get memory value from saved data or use default
         memory_value = "2048"
         if hasattr(self, 'saved_wizard_data') and 'memory' in self.saved_wizard_data:
-            memory_value = self.saved_wizard_data['memory']
+            memory_value = self.saved_wizard_data['advanced']['memory']
 
         self.memory_var = tki.StringVar(value=memory_value)
         self.memory_entry = tki.CTkEntry(self.wizard_content, width=200,
@@ -1286,7 +1364,7 @@ class MCManager(tki.CTk):
             server_port=None,
             memory=4096,
             backup=None
-        ):  # sourcery skip: extract-method
+        ):  # sourcery skip: extract-method, low-code-quality
         """Thread to handle server creation process"""
 
         try:
@@ -1295,6 +1373,8 @@ class MCManager(tki.CTk):
                 server_name = self.server_name_var.get()
                 server_type = self.server_type_var.get()
                 mc_version = self.version_var.get()
+            # Ensure server_name is not None before iteration
+            server_name = server_name or "server"
             server_folder_name = "".join(c if c.isalnum() or c in ['-', '_'] else '_' for c in server_name)
 
             # Update status
@@ -1380,8 +1460,8 @@ class MCManager(tki.CTk):
                     "memory": memory,
                     "backup": {
                         "enabled": bool(backup) if backup else False,
-                        "frequency": float(backup.split('|')[0]) if backup else 24.0,
-                        "max_backups": backup.split('|')[1] if backup else 10
+                        "frequency": float(backup.split('-')[0]) if backup else 24.0,
+                        "max_backups": backup.split('-')[1] if backup else 10
                     }
                 }
 
@@ -1705,6 +1785,7 @@ class MCManager(tki.CTk):
             self.update_plugins()
 
         except Exception as e:
+            raise e
             self.show_notification(f"Error changing server: {str(e)}", "error")
 
     def start_server(self):
@@ -1746,7 +1827,7 @@ class MCManager(tki.CTk):
             self.current_server.restart()
             self.update_dashboard()
 
-    def load_server_settings(self):  # sourcery skip: low-code-quality
+    def load_server_settings(self):    # sourcery skip: low-code-quality
         """Load server settings from config file"""
         if not hasattr(self, 'current_server') or not self.current_server:
             return
@@ -1816,11 +1897,15 @@ class MCManager(tki.CTk):
                                             self.settings['advanced'][key] = False
                                         else:
                                             self.settings['advanced'][key] = value
-                                except:
+                                except Exception:
                                     pass
 
                 # Update UI with loaded settings
-                self.apply_settings_to_ui()
+                if '-nogui' not in self.args and hasattr(self, 'current_server') and self.current_server and self.current_server._is_running:
+                    self.apply_settings_to_ui()
+
+                if self.current_server:
+                    self.current_server.max_ram = self.settings['advanced']['memory']
 
             except Exception as e:
                 print(f"Error loading settings: {e}")
@@ -1910,6 +1995,283 @@ class MCManager(tki.CTk):
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(('localhost', port)) == 0
+
+    def start_tunnel(self):
+        """Start an ngrok tunnel for the current server port"""
+        if not self.current_server:
+            self.show_notification("No server selected", "error")
+            return
+
+        # Get the server port
+        server_port = self.current_server.get_port()
+        if not server_port:
+            self.show_notification("Could not determine server port", "error")
+            return
+
+        # Check if ngrok is already running
+        import psutil
+        for proc in psutil.process_iter(['pid', 'name']):
+            if 'ngrok' in proc.info['name'].lower():
+                self.show_notification("Ngrok is already running", "warning")
+                return
+
+        # Create progress window
+        self.tunnel_progress = tki.CTkToplevel(self)
+        self.tunnel_progress.title("Setting up tunnel")
+        self.tunnel_progress.geometry("500x300")
+        self.tunnel_progress.transient(self)
+        self.tunnel_progress.grab_set()
+
+        # Configure grid
+        self.tunnel_progress.grid_columnconfigure(0, weight=1)
+
+        # Title
+        title = tki.CTkLabel(self.tunnel_progress, text="Setting up External Tunnel",
+                        font=tki.CTkFont(size=18, weight="bold"))
+        title.grid(row=0, column=0, padx=20, pady=(20, 10))
+
+        # Status label
+        self.tunnel_status = tki.CTkLabel(self.tunnel_progress, text="Checking for ngrok...")
+        self.tunnel_status.grid(row=1, column=0, padx=20, pady=(0, 10))
+
+        # Progress bar
+        self.tunnel_progress_bar = tki.CTkProgressBar(self.tunnel_progress, width=400)
+        self.tunnel_progress_bar.grid(row=2, column=0, padx=20, pady=(0, 10))
+        self.tunnel_progress_bar.set(0.1)
+
+        # Detail log
+        log_frame = tki.CTkFrame(self.tunnel_progress)
+        log_frame.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
+        self.tunnel_progress.grid_rowconfigure(3, weight=1)
+
+        self.tunnel_log = tki.CTkTextbox(log_frame, height=120, width=400)
+        self.tunnel_log.pack(fill=tki.BOTH, expand=True, padx=10, pady=10)
+
+        # Start tunnel setup in a separate thread
+        threading.Thread(target=self._setup_tunnel_thread, args=(server_port,), daemon=True).start()
+
+    def _setup_tunnel_thread(self, port):
+        """Thread to handle ngrok setup and tunnel creation"""
+        try:
+            # Add log entry
+            self._add_tunnel_log("Starting tunnel setup...")
+
+            # Determine ngrok path
+            ngrok_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin")
+            os.makedirs(ngrok_dir, exist_ok=True)
+
+            ngrok_exe = os.path.join(ngrok_dir, "ngrok.exe")
+
+            # Check if ngrok exists
+            if not os.path.exists(ngrok_exe):
+                self._update_tunnel_status("Downloading ngrok...", 0.2)
+                # Download code...
+
+            # Start ngrok
+            self._update_tunnel_status("Starting tunnel...", 0.7)
+            self._add_tunnel_log(f"Starting ngrok TCP tunnel on port {port}")
+
+            # Run ngrok with output capture
+            self.ngrok_process = subprocess.Popen(
+                [ngrok_exe, "tcp", str(port)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+
+            # Wait longer for ngrok to start
+            self._update_tunnel_status("Waiting for tunnel to initialize...", 0.8)
+            time.sleep(2)  # Increased wait time
+
+            # Check if process is still running
+            if self.ngrok_process.poll() is not None:
+                # Process exited - get error message
+                _, stderr = self.ngrok_process.communicate()
+                self._add_tunnel_log(f"Ngrok failed to start: {stderr}")
+                self._update_tunnel_status("Failed to start tunnel", 0)
+                self.after(0, lambda: self.show_notification(f"Tunnel creation failed: ngrok process exited", "error"))
+                return
+
+            # Try to get URL from API with retries
+            self._update_tunnel_status("Retrieving tunnel address...", 0.9)
+
+            # Attempt to get tunnel info from API with retries
+            tunnel_url = None
+            max_retries = 15
+
+            for retry in range(max_retries):
+                try:
+                    self._add_tunnel_log(f"Connecting to ngrok API (attempt {retry+1}/{max_retries})...")
+                    response = requests.get("http://localhost:4040/api/tunnels", timeout=3)
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        if "tunnels" in data and data["tunnels"]:
+                            tunnel = data["tunnels"][0]
+                            tunnel_url = tunnel["public_url"]
+                            break
+                        else:
+                            self._add_tunnel_log("No tunnels found in API response")
+                    else:
+                        self._add_tunnel_log(f"API returned status code: {response.status_code}")
+
+                except Exception as e:
+                    self._add_tunnel_log(f"API connection attempt {retry+1} failed: {str(e)}")
+
+                # Wait before retrying
+                time.sleep(1.5)
+
+            # Process the tunnel URL if found
+            if tunnel_url:
+                # Extract host and port from URL (tcp://0.tcp.ngrok.io:12345)
+
+                match = re.search(r'tcp://([^:]+):(\d+)', tunnel_url)
+                if match:
+                    host, tunnel_port = match.groups()
+
+                    # Use our robust resolution method
+                    ip_address = _resolve_hostname(host)
+
+                    if ip_address:
+                        # Create connection messages with both hostname and IP
+                        message = (f"Tunnel created!\n\n"
+                                f"IP Address: {ip_address}\n"  # Show IP first for emphasis
+                                f"Hostname: {host} (may not work with all DNS providers)\n"
+                                f"Port: {tunnel_port}\n\n"
+                                f"Players should connect using:\n"
+                                f"{ip_address}:{tunnel_port}")
+
+                        self._update_tunnel_status("Tunnel created successfully!", 1.0)
+                        self._add_tunnel_log(message)
+
+                        # Show in message box
+                        self.after(0, lambda: self.show_notification(
+                            f"Tunnel created!\n\n"
+                            f"IP Address: {ip_address}\n"
+                            f"Hostname: {host}\n"
+                            f"Port: {tunnel_port}\n\n"
+                            f"Players should connect using:\n"
+                            f"{ip_address}:{tunnel_port}"
+                        ))
+                    else:
+                        # If resolution fails completely
+                        self._add_tunnel_log(f"Could not resolve hostname {host} to IP address")
+                        message = f"Tunnel created!\nHostname: {host}\nPort: {tunnel_port}\n\nTry connecting using: {host}:{tunnel_port}"
+
+        except Exception as e:
+            self._add_tunnel_log(f"Error: {str(e)}")
+            self._update_tunnel_status(f"Error: {str(e)}", 0)
+            self.after(0, self.show_notification, f"Tunnel creation failed: {str(e)}", "error")
+
+    def _extract_tunnel_info_from_output(self, process):
+        """Extract tunnel address from ngrok output and resolve IP"""
+        try:
+            import re
+            import socket
+
+            # Read a limited amount of output
+            output = ""
+            start_time = time.time()
+
+            # Try reading output for up to 5 seconds
+            while time.time() - start_time < 5:
+                if process.stdout.readable():
+                    line = process.stdout.readline()
+                    if not line:
+                        time.sleep(0.1)
+                        continue
+
+                    output += line
+                    self._add_tunnel_log(f"Ngrok output: {line.strip()}")
+
+                    # Look for tunnel URL in the output
+                    # Format might be like: "Forwarding tcp://0.tcp.ngrok.io:12345 -> localhost:25565"
+                    match = re.search(r'tcp://([^:]+):(\d+)', line)
+                    if match:
+                        host, port = match.groups()
+
+                        # Try to resolve hostname to IP
+                        try:
+                            ip_address = socket.gethostbyname(host)
+                            self._add_tunnel_log(f"Resolved hostname {host} to IP: {ip_address}")
+
+                            # Create message with both hostname and IP
+                            message = (f"Tunnel created!\n\n"
+                                      f"Hostname: {host}\n"
+                                      f"IP Address: {ip_address}\n"
+                                      f"Port: {port}\n\n"
+                                      f"Players can connect using either:\n"
+                                      f"{host}:{port}\n"
+                                      f"or\n"
+                                      f"{ip_address}:{port}")
+
+                            self._update_tunnel_status("Tunnel created successfully!", 1.0)
+                            self._add_tunnel_log(message)
+
+                            # Show in a message box
+                            self.after(0, lambda: self.show_notification(
+                                f"Tunnel created!\n\n"
+                                f"Hostname: {host}\n"
+                                f"IP Address: {ip_address}\n"
+                                f"Port: {port}\n\n"
+                                f"Players can connect using either:\n"
+                                f"{host}:{port}\n"
+                                f"or\n"
+                                f"{ip_address}:{port}"
+                            ))
+                            return True
+                        except socket.gaierror:
+                            # If hostname can't be resolved, still show what we have
+                            self._add_tunnel_log(f"Could not resolve hostname {host} to IP address")
+                            message = f"Tunnel created!\nAddress: {host}\nPort: {port}\n\nPlayers can connect using: {host}:{port}"
+                            self._update_tunnel_status("Tunnel created successfully!", 1.0)
+                            self._add_tunnel_log(message)
+
+                            # Show in a message box
+                            self.after(0, lambda: self.show_notification(
+                                f"Tunnel created!\n\nAddress: {host}:{port}\n\nShare this address with players to connect."
+                            ))
+                            return True
+                else:
+                    time.sleep(0.1)
+
+            # If we get here, couldn't find the tunnel URL in the output
+            self._add_tunnel_log("Tunnel appears to be running, but couldn't determine the address.")
+            self._add_tunnel_log("Try checking the ngrok web interface at http://localhost:4040")
+            self._update_tunnel_status("Open http://localhost:4040 in your browser to see tunnel details", 1.0)
+            self.after(0, lambda: self.show_notification(
+                "Tunnel created, but couldn't extract address automatically.\n\nOpen http://localhost:4040 in your browser to see connection details."
+            ))
+            return False
+
+        except Exception as e:
+            self._add_tunnel_log(f"Error extracting tunnel info: {str(e)}")
+            return False
+
+    def _update_tunnel_status(self, message, progress_value):
+        """Update tunnel progress status"""
+        def update_ui():
+            self.tunnel_status.configure(text=message)
+            self.tunnel_progress_bar.set(progress_value)
+
+        self.after(0, update_ui)
+
+    def _add_tunnel_log(self, message):
+        """Add message to tunnel log"""
+        def update_log():
+            self.tunnel_log.configure(state="normal")
+            self.tunnel_log.insert("end", f"{message}\n")
+            self.tunnel_log.configure(state="disabled")
+            self.tunnel_log.see("end")
+
+        self.after(0, update_log)
+
+    def close_tunnel(self):
+        if not hasattr(self, 'ngrok_tunnel'):
+            return
+
+        self.ngrok_tunnel.terminate()
 
     # Setup tabs --- MARKER ---
     def setup_dashboard_tab(self):
@@ -2084,7 +2446,7 @@ class MCManager(tki.CTk):
         # Create value label that will be updated with current RAM usage
         self.ram_value_label = tki.CTkLabel(
             ram_header,
-            text="0 MB (0.00 GB, 0.0%)",
+            text="0.0% (0.0 GB)",
             text_color="green"
         )
         self.ram_value_label.pack(side="right", padx=(0, 5))
@@ -2126,7 +2488,7 @@ class MCManager(tki.CTk):
             linewidth=1.5
         )
 
-        self.ram_ax.set_ylim(0, 100)
+        self.ram_ax.set_ylim(0, 110)
 
         # Add the missing uptime label and player count
         self.uptime_label = tki.CTkLabel(self.info_frame, text="Uptime:", font=tki.CTkFont(weight="bold"))
@@ -2832,7 +3194,7 @@ class MCManager(tki.CTk):
 
     def load_optimization_settings(self):
         """Load existing optimization settings and update UI"""
-        if not hasattr(self, 'current_server') or not self.current_server:
+        if not hasattr(self, 'current_server') or not self.current_server or '-nogui' in self.args:
             return
 
         try:
@@ -2881,7 +3243,7 @@ class MCManager(tki.CTk):
             traceback.print_exc()
 
     # Resource monitoring
-    def monitor_resources(self):  # sourcery skip: low-code-quality
+    def monitor_resources(self):    # sourcery skip: low-code-quality
         """Monitor and update resource usage periodically with improved stability"""
         max_points = 60  # Store last 60 data points
         cpu_count = psutil.cpu_count()  # Get number of CPU cores
@@ -2896,163 +3258,185 @@ class MCManager(tki.CTk):
         was_running = False
         last_idx = 0  # Keep track of the last plot index
 
+        if not hasattr(self, 'settings'):
+            self.load_server_settings()
+
         max_ram_gb = float(self.settings.get('advanced',{}).get('memory', 4096)) / 1024
 
         if '-nogui' in self.args:
             console = ''
+            is_terminal = os.isatty(sys.stdout.fileno())
+
             while self.running:
-                cpu_usage = self.current_server.get_cpu()
-                ram_usage = self.current_server.get_ram()
+                try:
+                    cpu_usage = self.current_server.get_cpu()
+                    ram_usage = self.current_server.get_ram()
 
-                # Log console
-                new_console = self.current_server.get_console()
-                if new_console != console:
-                    console = new_console
-                    print(console)
+                    # Log console (only show new content)
+                    new_console = self.current_server.get_console()
+                    if new_console != console:
+                        new_content = new_console.removeprefix(console)
+                        if new_content:
+                            # Clear current line before printing
+                            if is_terminal:
+                                sys.stdout.write("\r\033[K")  # Clear the line
 
-                # Normalize CPU usage by cores and cap at 100%
-                normalized_cpu = min(100, cpu_usage / cpu_count if cpu_count > 0 else cpu_usage)
+                            # Print the new content
+                            print(new_content, end='', flush=True)
 
-                # Calculate RAM percentage and cap at 100%
-                # Ensure max_ram is never 0 to avoid division by zero
-                if max_ram_gb <= 0:
-                    # Use a reasonable default if max_ram is not available
-                    max_ram_gb = 16
-                    print(f"Warning: max_ram was 0 or negative. Set MAX ram to: {max_ram_gb} GB")
+                            # Add a new command prompt if needed
+                            if is_terminal and not new_content.endswith('\n'):
+                                print()  # Ensure we're on a new line
 
-                # Format RAM values for display
-                ram_gb = ram_usage / 1024
+                            # Add command prompt after console output
+                            print("> ", end='', flush=True)
 
-                ram_pct = min(100, (ram_gb / max_ram_gb * 100))
-                ram_pct = min(100, (ram_gb / max_ram_gb * 100))
+                        console = new_console
 
-                print(f'RESOURCE USAGE | CPU: {normalized_cpu:.2f}%, RAM: {ram_pct:.2f}% ({ram_gb:.2f}/{max_ram_gb:.2f} GB)')
+                    # Normalize CPU usage and update resource display
+                    normalized_cpu = cpu_usage / cpu_count if cpu_count > 0 else cpu_usage
+                    ram_gb = ram_usage / 1024
+                    ram_pct = ram_gb / max_ram_gb * 100
 
-                time.sleep(0.1)
+                    # Format resource usage message
+                    status_msg = f'RESOURCE USAGE | CPU: {normalized_cpu:.1f}%, RAM: {ram_pct:.1f}% ({ram_gb:.1f}/{max_ram_gb:.1f} GB)'
+
+                    # Display at top of terminal
+                    if is_terminal:
+                        self._update_cursor_and_display_status(status_msg)
+
+                    time.sleep(0.1)
+                except Exception as e:
+                    print(f"Error monitoring resources: {e}", file=sys.stderr)
+                    time.sleep(0.1)
+
             return
-
 
 
         while self.running:
             try:
-                if hasattr(self, 'current_server') and self.current_server:
-                    is_running = self.current_server.is_running()
+                if not (hasattr(self, 'current_server') and self.current_server and self.tk_running):
+                    time.sleep(0.5)
+                    continue
 
-                    # Server state change detection
-                    server_state_changed = (was_running != is_running)
-                    was_running = is_running
+                is_running = self.current_server.is_running()
 
-                    if is_running:
-                        # Get CPU and RAM usage
-                        try:
-                            cpu_usage = self.current_server.get_cpu()
-                            ram_usage = self.current_server.get_ram()
+                # Server state change detection
+                server_state_changed = (was_running != is_running)
+                was_running = is_running
 
-                            # Normalize CPU usage by cores and cap at 100%
-                            normalized_cpu = min(100, cpu_usage / cpu_count if cpu_count > 0 else cpu_usage)
+                if is_running:
+                    # Get CPU and RAM usage
+                    try:
+                        cpu_usage = self.current_server.get_cpu()
+                        ram_usage = self.current_server.get_ram()
 
-                            # Calculate RAM percentage and cap at 100%
-                            # Ensure max_ram is never 0 to avoid division by zero
-                            if max_ram_gb <= 0:
-                                # Use a reasonable default if max_ram is not available
-                                max_ram_gb = 16
-                                print(f"Warning: max_ram was 0 or negative. Set MAX ram to: {max_ram_gb} GB")
+                        # Normalize CPU usage by cores and cap at 100%
+                        normalized_cpu = cpu_usage / cpu_count if cpu_count > 0 else cpu_usage
 
-                            # Format RAM values for display
-                            ram_gb = ram_usage / 1024
+                        # Calculate RAM percentage and cap at 100%
+                        # Ensure max_ram is never 0 to avoid division by zero
+                        if max_ram_gb <= 0:
+                            # Use a reasonable default if max_ram is not available
+                            max_ram_gb = 16
+                            print(f"Warning: max_ram was 0 or negative. Set MAX ram to: {max_ram_gb} GB")
 
-                            ram_pct = min(100, (ram_gb / max_ram_gb * 100))
+                        # Format RAM values for display
+                        ram_gb = ram_usage / 1024
 
-                            # Update CPU value label safely
-                            if hasattr(self, 'cpu_value_label') and self.running:
-                                formatted_cpu = f"{normalized_cpu:.1f}%"
-                                self.after(0, lambda text=formatted_cpu:
-                                    self.cpu_value_label.configure(text=text)
-                                    if hasattr(self, 'cpu_value_label') else None)
+                        ram_pct = ram_gb / max_ram_gb * 100
 
-                            # Update RAM value label safely
-                            if hasattr(self, 'ram_value_label') and self.running:
-                                formatted_ram = f"{ram_pct:.1f}% ({ram_gb:.1f} GB)"
-                                self.after(0, lambda text=formatted_ram:
-                                    self.ram_value_label.configure(text=text)
-                                    if hasattr(self, 'ram_value_label') else None)
-
-                            # Update graph data - use continuous indexing instead of modulo
-                            last_idx += 1
-
-                            # Only add points if values are valid
-                            if normalized_cpu >= 0:
-                                self.cpu_times.append(last_idx)
-                                self.cpu_data.append(normalized_cpu)
-
-                            if ram_pct >= 0:
-                                self.ram_times.append(last_idx)
-                                self.ram_data.append(ram_pct)
-
-                            # Keep only the most recent points
-                            if len(self.cpu_times) > max_points:
-                                self.cpu_times = self.cpu_times[-max_points:]
-                                self.cpu_data = self.cpu_data[-max_points:]
-
-                            if len(self.ram_times) > max_points:
-                                self.ram_times = self.ram_times[-max_points:]
-                                self.ram_data = self.ram_data[-max_points:]
-
-                        except Exception as e:
-                            print(f"Error collecting resource data: {e}")
-
-                    elif server_state_changed:
-                        print("Dropping graph data.")
-
-                        self.cpu_data = []
-                        self.cpu_times = []
-                        self.ram_data = []
-                        self.ram_times = []
-                        last_idx = 0  # Reset the counter too
-
-                        # Reset labels
+                        # Update CPU value label safely
                         if hasattr(self, 'cpu_value_label') and self.running:
-                            self.after(0, lambda:
-                                self.cpu_value_label.configure(text="0.0%")
+                            formatted_cpu = f"{normalized_cpu:.1f}%"
+                            self.after(0, lambda text=formatted_cpu:
+                                self.cpu_value_label.configure(text=text)
                                 if hasattr(self, 'cpu_value_label') else None)
 
+                        # Update RAM value label safely
                         if hasattr(self, 'ram_value_label') and self.running:
-                            self.after(0, lambda:
-                                self.ram_value_label.configure(text="0 MB (0.00 GB, 0.0%)")
+                            formatted_ram = f"{ram_pct:.1f}% ({ram_gb:.1f}/{max_ram_gb:.1f} GB)"
+                            self.after(0, lambda text=formatted_ram:
+                                self.ram_value_label.configure(text=text)
                                 if hasattr(self, 'ram_value_label') else None)
 
-                    # Always update plots when UI exists
-                    if '-nogui' not in self.args and all(hasattr(self, attr) for attr in ['cpu_line', 'ram_line', 'cpu_canvas', 'ram_canvas']) and self.running:
-                        try:
-                            # Update the plot data
-                            self.cpu_line.set_data(self.cpu_times, self.cpu_data)
-                            self.ram_line.set_data(self.ram_times, self.ram_data)
+                        # Update graph data - use continuous indexing instead of modulo
+                        last_idx += 1
 
-                            # Adjust x-axis limits
-                            if self.cpu_times or self.ram_times:
-                                # Use the longest data array to determine x limits
-                                latest_point = max(
-                                    self.cpu_times[-1] if self.cpu_times else 0,
-                                    self.ram_times[-1] if self.ram_times else 0
-                                )
-                                x_min = max(0, latest_point - 60)
-                                x_max = max(60, latest_point)
-                                self.cpu_ax.set_xlim(x_min, x_max)
-                                self.ram_ax.set_xlim(x_min, x_max)
-                            else:
-                                self.cpu_ax.set_xlim(0, 60)
-                                self.ram_ax.set_xlim(0, 60)
+                        # Only add points if values are valid
+                        if normalized_cpu >= 0:
+                            self.cpu_times.append(last_idx)
+                            self.cpu_data.append(min(100,normalized_cpu))
 
-                            # Always use 0-100% range for y-axis
-                            self.cpu_ax.set_ylim(0, 100)
-                            self.ram_ax.set_ylim(0, 100)
+                        if ram_pct >= 0:
+                            self.ram_times.append(last_idx)
+                            self.ram_data.append(min(100,ram_pct))
 
-                            # Redraw the canvases
+                        # Keep only the most recent points
+                        if len(self.cpu_times) > max_points:
+                            self.cpu_times = self.cpu_times[-max_points:]
+                            self.cpu_data = self.cpu_data[-max_points:]
+
+                        if len(self.ram_times) > max_points:
+                            self.ram_times = self.ram_times[-max_points:]
+                            self.ram_data = self.ram_data[-max_points:]
+
+                    except Exception as e:
+                        print(f"Error collecting resource data: {e}")
+
+                elif server_state_changed:
+                    print("Dropping graph data.")
+
+                    self.cpu_data = []
+                    self.cpu_times = []
+                    self.ram_data = []
+                    self.ram_times = []
+                    last_idx = 0  # Reset the counter too
+
+                    # Reset labels
+                    if hasattr(self, 'cpu_value_label') and self.running:
+                        self.after(0, lambda:
+                            self.cpu_value_label.configure(text="0.0%")
+                            if hasattr(self, 'cpu_value_label') else None)
+
+                    if hasattr(self, 'ram_value_label') and self.running:
+                        self.after(0, lambda:
+                            self.ram_value_label.configure(text="0 MB (0.00 GB, 0.0%)")
+                            if hasattr(self, 'ram_value_label') else None)
+
+                # Always update plots when UI exists
+                if all(hasattr(self, attr) for attr in ['cpu_line', 'ram_line', 'cpu_canvas', 'ram_canvas']) and self.running:
+                    try:
+                        # Update the plot data
+                        self.cpu_line.set_data(self.cpu_times, self.cpu_data)
+                        self.ram_line.set_data(self.ram_times, self.ram_data)
+
+                        # Adjust x-axis limits
+                        if self.cpu_times or self.ram_times:
+                            # Use the longest data array to determine x limits
+                            latest_point = max(
+                                self.cpu_times[-1] if self.cpu_times else 0,
+                                self.ram_times[-1] if self.ram_times else 0
+                            )
+                            x_min = max(0, latest_point - 60)
+                            x_max = max(60, latest_point)
+                            self.cpu_ax.set_xlim(x_min, x_max)
+                            self.ram_ax.set_xlim(x_min, x_max)
+                        else:
+                            self.cpu_ax.set_xlim(0, 60)
+                            self.ram_ax.set_xlim(0, 60)
+
+                        # Always use 0-100% range for y-axis
+                        self.cpu_ax.set_ylim(0, 100)
+                        self.ram_ax.set_ylim(0, 110)
+
+                        # Redraw the canvases
+                        if self.tk_running:
                             self.cpu_canvas.draw_idle()
                             self.ram_canvas.draw_idle()
-                        except Exception as e:
-                            print(f"Error updating plots: {e}")
-                            traceback.print_exc()
+                    except Exception as e:
+                        print(f"Error updating plots: {e}")
+                        traceback.print_exc()
 
             except Exception as e:
                 print(f"Error in monitor_resources: {e}")
@@ -3060,6 +3444,19 @@ class MCManager(tki.CTk):
 
             # Sleep interval
             time.sleep(0.5)  # Update every half second
+
+    def _update_cursor_and_display_status(self, status_msg):
+        # Save cursor position
+        sys.stderr.write('\033[s')
+        # Go to the beginning of the first line
+        sys.stderr.write('\033[1;1H')
+        # Clear the line
+        sys.stderr.write('\033[K')
+        # Print resource usage
+        sys.stderr.write(status_msg)
+        # Restore cursor position (where user might be typing)
+        sys.stderr.write('\033[u')
+        sys.stderr.flush()
 
     def update_dashboard(self):
         """Update dashboard with current server information"""
@@ -3090,28 +3487,159 @@ class MCManager(tki.CTk):
 
     def update_console(self):
         """Update console text with latest output"""
-        if hasattr(self, 'current_server') and self.current_server:
+        if not (
+                hasattr(self, 'current_server')
+                and self.current_server
+                and hasattr(self, 'console_output')
+            ):
+            # Schedule next update
+            self.after(100, self.update_console)
+            return
+        else:
             console_text = self.current_server.get_console()
 
-            # Only update if text has changed
-            if console_text != self.console_output.get("1.0", tki.END).strip():
-                # Save current position
-                current_pos = self.console_output.yview()
+        if console_text == self.console_output.get("1.0", tki.END).strip():
+            # Schedule next update
+            self.after(100, self.update_console)
+            return
 
-                self.console_output.configure(state="normal")
-                self.console_output.delete("1.0", tki.END)
-                self.console_output.insert(tki.END, console_text)
+        # Save current position
+        current_pos = self.console_output.yview()
 
-                # Auto-scroll if user was at the bottom
+        self.console_output.configure(state="normal")
+        self.console_output.delete("1.0", tki.END)
+
+        # Setup text tags for ANSI colors if they don't exist yet
+        if not hasattr(self, 'console_tags_configured'):
+            self._setup_console_tags()
+
+        # Parse ANSI color codes and insert with appropriate tags
+        self._insert_colored_text(console_text)
+
+        # Handle auto-scrolling
+        self._handle_console_scroll(current_pos)
+
+        self.console_output.configure(state="disabled")
+
+        # Schedule next update
+        self.after(100, self.update_console)
+
+    def _setup_console_tags(self):
+        """Configure tags for ANSI color codes"""
+        # Basic colors
+        color_map = {
+            "red": "red",
+            "green": "green",
+            "yellow": "yellow",
+            "blue": "blue",
+            "magenta": "magenta",
+            "cyan": "cyan",
+            "white": "white",
+            "bright_red": "#ff5555",
+            "bright_green": "#55ff55",
+            "bright_yellow": "#ffff55",
+            "bright_blue": "#5555ff",
+            "bright_magenta": "#ff55ff",
+            "bright_cyan": "#55ffff",
+            "bright_white": "#ffffff"
+        }
+
+        for tag_name, color in color_map.items():
+            self.console_output._textbox.tag_configure(tag_name, foreground=color)
+
+        # Initialize RGB tag tracking
+        self.rgb_tags = set()
+        self.console_tags_configured = True
+
+    def _insert_colored_text(self, console_text):
+        """Parse ANSI codes and insert text with appropriate formatting"""
+        import re
+        ansi_pattern = re.compile(r'\033\[([\d;]*)m')
+        current_pos = 0
+        current_tag = None
+
+        # Map ANSI codes to tag names
+        ansi_code_map = {
+            '31': "red",
+            '32': "green",
+            '33': "yellow",
+            '34': "blue",
+            '35': "magenta",
+            '36': "cyan",
+            '37': "white",
+            '91': "bright_red",
+            '92': "bright_green",
+            '93': "bright_yellow",
+            '94': "bright_blue",
+            '95': "bright_magenta",
+            '96': "bright_cyan",
+            '97': "bright_white"
+        }
+
+        # Find all ANSI codes
+        for match in ansi_pattern.finditer(console_text):
+            # Insert text before the ANSI code with previous tag
+            if match.start() > current_pos:
+                text = console_text[current_pos:match.start()]
+                if current_tag:
+                    self.console_output._textbox.insert(tki.END, text, current_tag)
+                else:
+                    self.console_output.insert(tki.END, text)
+
+            # Process the ANSI code to determine the new tag
+            code = match.group(1)
+
+            if code == '0' or code == '':
+                current_tag = None  # Reset to default
+            elif code.startswith('38;2;'):  # RGB foreground color
+                current_tag = self._process_rgb_code(code)
+            elif code in ansi_code_map:
+                current_tag = ansi_code_map[code]
+
+            current_pos = match.end()
+
+        # Insert any remaining text
+        if current_pos < len(console_text):
+            text = console_text[current_pos:]
+            if current_tag:
+                self.console_output._textbox.insert(tki.END, text, current_tag)
+            else:
+                self.console_output.insert(tki.END, text)
+
+    def _process_rgb_code(self, code):
+        """Process RGB ANSI color code (38;2;R;G;B)"""
+        try:
+            parts = code.split(';')
+            if len(parts) >= 5:  # Make sure we have all parts
+                r, g, b = int(parts[2]), int(parts[3]), int(parts[4])
+                rgb_tag = f"rgb_{r}_{g}_{b}"  # Create a unique tag name
+
+                # Check if we need to create this color tag
+                if rgb_tag not in self.rgb_tags:
+                    hex_color = f"#{r:02x}{g:02x}{b:02x}"
+                    self.console_output._textbox.tag_configure(rgb_tag, foreground=hex_color)
+                    self.rgb_tags.add(rgb_tag)  # Remember we created this tag
+
+                return rgb_tag
+        except Exception:
+            pass
+        return None
+
+    def _handle_console_scroll(self, current_pos):
+        """Handle auto-scrolling of console output"""
+        try:
+            # Check if current_pos is a tuple with at least 2 elements
+            if isinstance(current_pos, tuple) and len(current_pos) >= 2:
                 if current_pos[1] > 0.9:
                     self.console_output.see(tki.END)
                 else:
                     self.console_output.yview_moveto(current_pos[0])
-
-                self.console_output.configure(state="disabled")
-
-        # Schedule next update
-        self.after(100, self.update_console)
+            else:
+                # Default to scrolling to the end
+                self.console_output.see(tki.END)
+        except (TypeError, IndexError):
+            # If any error occurs during scrolling, just scroll to end
+            self.console_output.see(tki.END)
 
     def update_console_periodic(self):
         """Update console output periodically"""
@@ -3258,7 +3786,7 @@ class MCManager(tki.CTk):
     def reload_plugins(self):
         """Reload all plugins on the server"""
         if self.current_server and self.current_server.is_running():
-            self.current_server.send_command("reload")
+            self.current_server.send_command("reload confirm")
             self.update_plugins()
             # Show confirmation message
             self.show_notification("Plugins reloaded successfully")
