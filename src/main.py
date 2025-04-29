@@ -8,12 +8,17 @@ import threading
 import traceback
 import requests
 import psutil
+import shutil
 import time
 import json
 import sys
 import os
 
-#matplotlib.use("TkAgg")  # Set the backend for matplotlib
+# Add java_downloader import
+try:
+    from java_downloader import download_portable_java
+except ImportError:
+    download_portable_java = None
 
 tki.set_appearance_mode('dark')
 
@@ -25,6 +30,13 @@ class MCManager(tki.CTk):
 
         self.args = args
         self.servers = self.get_server_list()
+
+        # Handle Java installation through command line
+        if '-install-java' in args:
+            self._install_java()
+            # Exit after Java installation if no GUI is requested
+            if '-nogui' in args:
+                sys.exit(0)
 
         if '-install' in args:
             argCount = 0
@@ -1088,7 +1100,7 @@ class MCManager(tki.CTk):
         else:
             self.show_notification("No players selected for removal.")
 
-    def wizard_step_summary(self):  # sourcery skip: low-code-quality
+    def wizard_step_summary(self: "MCManager"):  # sourcery skip: low-code-quality
         """Step 5: Summary of server settings before creation"""
         # Create scrollable frame for summary
         self.wizard_content.grid_columnconfigure(0, weight=1)
@@ -1474,6 +1486,7 @@ class MCManager(tki.CTk):
         """Create server.properties file with wizard settings"""
         if '-nogui' not in self.args and '-install' not in self.args:
             properties = {
+                "server-ip": "127.0.0.1",
                 "server-port": self.server_port_var.get(),
                 "motd": self.server_desc_var.get(),
                 "max-players": self.max_players_var.get(),
@@ -1553,6 +1566,7 @@ class MCManager(tki.CTk):
 
     def _do_import_server(self, source_dir):  # sourcery skip: low-code-quality
         """Perform the actual server import"""
+
 
         try:
             server_name = self.import_name_var.get().strip()
@@ -1676,6 +1690,7 @@ class MCManager(tki.CTk):
     def change_server(self, server_name):
         """Change the current selected server"""
         self.current_server = Server(server_name)
+        self.current_server.update_status()
 
         # Add this line to load settings when a server is selected
         self.load_server_settings()
@@ -1688,7 +1703,6 @@ class MCManager(tki.CTk):
             self.update_console()
             self.update_players()
             self.update_plugins()
-
 
         except Exception as e:
             self.show_notification(f"Error changing server: {str(e)}", "error")
@@ -2910,6 +2924,7 @@ class MCManager(tki.CTk):
                 ram_gb = ram_usage / 1024
 
                 ram_pct = min(100, (ram_gb / max_ram_gb * 100))
+                ram_pct = min(100, (ram_gb / max_ram_gb * 100))
 
                 print(f'RESOURCE USAGE | CPU: {normalized_cpu:.2f}%, RAM: {ram_pct:.2f}% ({ram_gb:.2f}/{max_ram_gb:.2f} GB)')
 
@@ -3356,9 +3371,8 @@ class MCManager(tki.CTk):
             toggle_btn.pack(side=tki.LEFT, padx=5, pady=5)
 
             # Delete button
-            delete_btn = tki.CTkButton(buttons_frame, text="Delete",
-                                      fg_color="red",
-                                      command=lambda p=plugin_name: self.delete_plugin(p))
+            delete_btn = tki.CTkButton(buttons_frame, text="Delete", fg_color="red",
+                                     command=lambda p=plugin_name: self.delete_plugin(p))
             delete_btn.pack(side=tki.LEFT, padx=5, pady=5)
 
             self.plugin_frames.append(plugin_frame)
@@ -3736,6 +3750,48 @@ class MCManager(tki.CTk):
 
         if result:
             self.start_server()
+
+# --- Java Installation Code ---
+    def _install_java(self):
+        """Install Java if not already installed"""
+        if not download_portable_java:
+            self.show_notification("Java installer not found. Please install Java manually.", "error")
+            return
+
+        # Show progress dialog
+        self.java_progress = tki.CTkToplevel(self)
+        self.java_progress.title("Installing Java")
+        self.java_progress.geometry("400x150")
+        self.java_progress.transient(self)
+        self.java_progress.grab_set()
+
+        progress_label = tki.CTkLabel(self.java_progress, text="Downloading and installing Java...")
+        progress_label.pack(pady=(20, 10))
+
+        progress_bar = tki.CTkProgressBar(self.java_progress, width=350)
+        progress_bar.pack(pady=(0, 10))
+        progress_bar.set(0.5)  # Indeterminate progress
+
+        # Download and install Java in a separate thread
+        def do_install():
+            try:
+                # Download and install Java
+                download_portable_java()
+                self.after(100, finish_install)
+            except Exception as e:
+                self.after(100, lambda: finish_install(str(e)))
+
+        def finish_install(error=None):
+            self.java_progress.destroy()
+            if error:
+                self.show_notification(f"Java installation failed: {error}", "error")
+            else:
+                self.show_notification("Java installed successfully")
+                # Optionally, start the server or perform other actions
+                if '-nogui' in self.args:
+                    self.start_server()
+
+        threading.Thread(target=do_install, daemon=True).start()
 
 args = sys.argv[1:]
 

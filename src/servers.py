@@ -1,3 +1,4 @@
+from mcstatus import JavaServer
 from datetime import datetime
 import subprocess
 import threading
@@ -31,8 +32,8 @@ def is_admin():
 
 launch_args = '-Xmx<RAM>M -Xms<RAM>M -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:+AlwaysPreTouch -XX:+DisableExplicitGC -XX:+UseNUMA -XX:NmethodSweepActivity=1 -XX:ReservedCodeCacheSize=400M -XX:NonNMethodCodeHeapSize=12M -XX:ProfiledCodeHeapSize=194M -XX:NonProfiledCodeHeapSize=194M -XX:-DontCompileHugeMethods -XX:MaxNodeLimit=240000 -XX:NodeLimitFudgeFactor=8000 -XX:+UseVectorCmov -XX:+PerfDisableSharedMem -XX:+UseFastUnorderedTimeStamps -XX:+UseCriticalJavaThreadPriority -XX:ThreadPriorityPolicy=1 -XX:AllocatePrefetchStyle=3  -XX:+UseG1GC -XX:MaxGCPauseMillis=37 -XX:+PerfDisableSharedMem -XX:G1HeapRegionSize=16M -XX:G1NewSizePercent=23 -XX:G1ReservePercent=20 -XX:SurvivorRatio=32 -XX:G1MixedGCCountTarget=3 -XX:G1HeapWastePercent=20 -XX:InitiatingHeapOccupancyPercent=10 -XX:G1RSetUpdatingPauseTimePercent=0 -XX:MaxTenuringThreshold=1 -XX:G1SATBBufferEnqueueingThresholdPercent=30 -XX:G1ConcMarkStepDurationMillis=5.0 -XX:GCTimeRatio=99'
 
+# Enable large pages, as they require administrators.
 if is_admin():
-    # Enable large pages, they can only be enabled with admin rights.
     launch_args += ' -XX:+UseLargePages -XX:LargePageSizeInBytes=2m'
 
 
@@ -58,8 +59,9 @@ class Server:
         self.max_ram = max_ram # MB
 
         # Player tracking
-        self.current_players = set()
-        self.last_player_update = 0
+        self.players = []
+        self.status = None
+        self.max_players = 0
 
     def _find_server_jar(self):
         """Find a server jar file in the server directory"""
@@ -68,10 +70,12 @@ class Server:
             return jar_files[0]  # Return the first jar file found
         return None
 
-    def start(self, raw=False):
+    def start(self):
         """Start the Minecraft server"""
         if self._is_running:
             return True
+
+        self.jar_path = self._find_server_jar()
 
         if not self.jar_path:
             print(f"No server jar found in {self.base_dir}")
@@ -85,14 +89,20 @@ class Server:
                     f.write("eula=true\n")
 
             # Get memory settings from server.properties or use default
-            memory = self._get_memory_setting()
+            memory = self._get_memory_setting()            # Find Java executable
+            java_path = self._find_java_executable()
+            if not java_path:
+                # This is a fallback error message when automatic download fails
+                raise FileNotFoundError(
+                    "Java executable not found and automatic download failed. Please run 'python src/java_downloader.py' to install portable Java, or manually install Java JDK 21"
+                )
 
             # Build Java command
             cmd = [
-                "java",
+                java_path,
                 *launch_args.replace("<RAM>", str(memory)).split(),
                 "-jar",
-                os.path.basename(self.jar_path),
+                self.jar_path.replace('\\','/'),
                 "nogui"
             ]
 
@@ -190,27 +200,10 @@ class Server:
         if not self.process:
             return
 
-        # Regex patterns for player tracking
-        join_pattern = re.compile(r'(\w+) joined the game')     # Join message
-        leave_pattern = re.compile(r'(\w+) left the game')      # Leave message
-
         try:
             for line in iter(self.process.stdout.readline, ''):
                 if not line:
                     break
-
-                # Track player joins
-                join_match = join_pattern.search(line)
-                if join_match:
-                    player_name = join_match[1]
-                    self.current_players.add(player_name.removeprefix('85m'))
-
-                # Track player leaves
-                leave_match = leave_pattern.search(line)
-                if leave_match:
-                    player_name = leave_match[1]
-                    if player_name in self.current_players:
-                        self.current_players.remove(player_name.removeprefix('85m'))
 
                 with self._console_lock:
                     self.console_output.append(line.strip())
@@ -223,51 +216,82 @@ class Server:
         finally:
             self._is_running = False
 
+    def update_status(self):
+        try:
+            server = JavaServer(self.get_ip(), self.get_port())
+            self.status = server.status()
+
+            # Get player count
+            player_count = self.status.players.online
+            self.max_players  = self.status.players.max
+
+            # Get player names (if available - some servers disable this)
+            self.players = []
+            if self.status.players.sample:
+                self.players = [player.name for player in self.status.players.sample]
+
+            return {
+                "online": player_count,
+                "max": self.max_players,
+                "players": self.players,
+                "version": self.status.version.name
+            }
+
+        except Exception as e:
+            print(f"Error querying server: {e}")
+            return {"online": 0, "max": 0, "players": []}
+            self.players = []
+            self.max_players = 0
+            self.status = None
+
     def get_players(self):
         """Get list of online players using active tracking"""
         if not self._is_running:
             return []
 
-        return list(self.current_players)
+        self.update_status()
+
+        return list(self.players)
 
     def get_max_players(self):
         """Get the maximum number of players allowed"""
+        if self._is_running:
+            self.update_status()
+            return self.max_players
+
+        # Get from server.properties
         try:
             prop_file = os.path.join(self.base_dir, "server.properties")
             if os.path.exists(prop_file):
                 with open(prop_file, 'r') as f:
                     for line in f:
                         if line.startswith("max-players="):
-                            return int(line.split('=')[1].strip())
-            return 20  # Default max players
+                            return line.split('=')[1].strip()
         except:
-            return 20
+            return 0
 
     def get_version(self):
         """Get the server version"""
-        # If running, try to get from console output
-        if self._is_running:
-            for line in self.console_output:
-                if "Starting minecraft server version" in line:
-                    match = re.search(r'version\s+(\S+)', line)
-                    if match:
-                        return match.group(1)
-
-        # Otherwise try to determine from jar file name
-        if self.jar_path:
-            jar_name = os.path.basename(self.jar_path)
-            # Common patterns: "spigot-1.16.5.jar", "paper-1.18.2.jar", etc.
-            match = re.search(r'[.-](\d+\.\d+\.\d+)[.-]', jar_name)
-            if match:
-                return match.group(1)
-
-        return "Unknown"
+        self.update_status()
+        return self.status.version.name
 
     def get_uptime(self):
         """Get server uptime in seconds"""
         if self._is_running and self.start_time:
             return time.time() - self.start_time
         return 0
+
+    def get_ip(self):
+        """Get the server IP address"""
+        try:
+            prop_file = os.path.join(self.base_dir, "server.properties")
+            if os.path.exists(prop_file):
+                with open(prop_file, 'r') as f:
+                    for line in f:
+                        if line.startswith("server-ip="):
+                            return line.split('=')[1].strip()
+        except:
+            return "127.0.0.1"
 
     def get_port(self):
         """Get the server port"""
@@ -551,9 +575,7 @@ class Server:
 
     def schedule_next_backup(self):
         """Schedule the next backup (this would be implemented differently in production)"""
-        pass  # This would be implemented with a scheduler in a real system
-
-    def update_settings(self, general=None, world=None, advanced=None):
+        pass  # This would be implemented with a scheduler in a real system    def update_settings(self, general=None, world=None, advanced=None):
         """Update server settings"""
         # This is a simplified implementation
         config_file = os.path.join(self.base_dir, "server_config.json")
@@ -577,6 +599,8 @@ class Server:
             config["advanced"] = advanced
             if "memory" in advanced:
                 self.max_ram = int(advanced["memory"])
+            if "java_path" in advanced:
+                config["java_path"] = advanced["java_path"]
 
         # Save configuration
         try:
@@ -843,6 +867,64 @@ class Server:
             },
             "presets": {}
         }
+
+    def _find_java_executable(self):
+        """Find the Java executable path on the system"""
+        # Check if a custom Java path is specified in the server config
+        config_file = os.path.join(self.base_dir, "server_config.json")
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    if "java_path" in config and os.path.exists(config["java_path"]):
+                        return config["java_path"]
+            except Exception as e:
+                print(f"Error reading server config: {str(e)}")
+
+        # Try the system PATH first
+        try:
+            # Use where command on Windows to find java executable
+            result = subprocess.run(["where", "java"], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
+              # Common Java installation directories on Windows
+        possible_locations = [
+            # System-wide installations (admin required)
+            os.path.join(os.environ.get('PROGRAMFILES', r'C:\Program Files'), 'Java'),
+            os.path.join(os.environ.get('PROGRAMFILES(X86)', r'C:\Program Files (x86)'), 'Java'),
+            r'C:\Program Files\Eclipse Adoptium',
+            r'C:\Program Files\Eclipse Foundation',
+            r'C:\Program Files\AdoptOpenJDK',
+            r'C:\Program Files\BellSoft\LibericaJDK',
+
+            # User-specific installations (no admin required)
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'Java'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'AdoptOpenJDK'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'Eclipse Adoptium'),
+            os.path.join(os.environ.get('APPDATA', ''), 'Java'),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Java'),
+
+            # Look in the servers directory for a portable Java installation
+            os.path.join(os.path.dirname(os.path.dirname(self.base_dir)), 'java'),
+            os.path.join(self.base_dir, 'java'),
+
+            # Look in common download locations
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Downloads', 'Java'),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Downloads')
+        ]
+
+        for base_dir in possible_locations:
+            if os.path.exists(base_dir):
+                # Search for java.exe in subdirectories
+                for root, dirs, files in os.walk(base_dir):
+                    if 'bin' in dirs:
+                        java_exe = os.path.join(root, 'bin', 'java.exe')
+                        if os.path.exists(java_exe):
+                            return java_exe
+
+        return None
 
 
 
